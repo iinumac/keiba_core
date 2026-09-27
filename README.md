@@ -7,6 +7,11 @@ Google Colab 上で動かすことを前提にしているが、ローカルで�
 
 ---
 
+> **このリポジトリは Private です。** Colab から使うには、画面左の鍵マーク
+> （シークレット）に `GITHUB_TOKEN`（GitHub の Personal Access Token / Classic、
+> `repo` スコープ）を登録してください。各ノートブックの先頭セルが
+> それを使って clone し、末尾セルが push します。
+
 ## クイックスタート
 
 ```python

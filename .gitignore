@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+venv/
+.venv/
+
+# DuckDB は Parquet を参照するビューを絶対パスで持つため、環境ごとに作り直す。
+# store.connect() が無ければ自動生成するので、コミットしないこと。
+data/keiba.duckdb
+data/keiba.duckdb.wal
+
+# エディタ
+.vscode/
+.idea/
+
+# 認証情報
+.env
+*.pem
+*.key

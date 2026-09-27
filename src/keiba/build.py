@@ -6,21 +6,18 @@ manifest が「再パースが必要なHTML」を決め、parse が解析し、s
 同じHTMLを二度パースしないのがここの主眼。初回だけ全件を処理し、
 以降は新しく増えたHTML（と、パーサを直したときの全件）だけが対象になる。
 
-【重要】並列実行するスクリプトから build() を呼ぶときは、必ず
-`if __name__ == "__main__":` で囲むこと。
+並列実行の子プロセスは fork で起動する（`_pool_context` 参照）。
+macOS の既定である spawn は子が親の __main__ を再 import するため、
+`if __name__ == "__main__":` の無いスクリプトや、標準入力からの実行で壊れる。
+fork ならそれが起きない。万一 fork も使えない環境では逐次実行に自動で落ちる。
 
-macOS の multiprocessing は spawn 方式で、子プロセスが親スクリプトを
-再 import する。ガードが無いと子プロセスが build() を再実行し、
-プロセスが再帰的に増え続ける。Colab（Linux）は fork なので起きないが、
-ローカル実行で必ず踏む。逐次実行したいときは workers=1 を渡す。
-
-    if __name__ == '__main__':
-        build.build()
+逐次で走らせたいときは workers=1 を渡す。
 """
 
 from __future__ import annotations
 
 import datetime as _dt
+import multiprocessing as _mp
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -48,6 +45,29 @@ def _parse_one(path_str: str) -> Tuple[str, Optional[dict], Optional[str]]:
 def default_workers() -> int:
     """並列数。CPUを使い切らず2コア残す。"""
     return max(1, (os.cpu_count() or 2) - 2)
+
+
+def _pool_context():
+    """子プロセスの起動方式を選ぶ。
+
+    macOS の既定は spawn で、子プロセスが親の __main__ を再 import する。
+    そのため次のいずれでも壊れる。
+
+    - `if __name__ == "__main__":` で囲んでいないスクリプト
+      （子が本体を再実行してプロセスが増え続ける）
+    - 標準入力や `python3 -c` からの実行
+      （__main__ にファイルが無く FileNotFoundError）
+
+    fork は __main__ を再 import しないため、どちらも起きない。
+    Linux（Colab）の既定も fork。forkserver は内部で spawn と同じ
+    __main__ 復元を行うので使えない（実測で失敗）。
+    """
+    try:
+        if 'fork' in _mp.get_all_start_methods():
+            return _mp.get_context('fork')
+    except Exception:
+        pass
+    return None
 
 
 def validate(parsed: dict) -> Optional[str]:
@@ -168,14 +188,35 @@ def build(years: Optional[Iterable[int]] = None,
             if progress and i % 500 == 0:
                 progress(i, total, 'parse')
     else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            paths = [str(t.path) for t in tasks]
-            for i, (path_str, parsed, err) in enumerate(
-                    ex.map(_parse_one, paths, chunksize=64), 1):
+        paths = [str(t.path) for t in tasks]
+        ctx = _pool_context()
+        try:
+            kw = {'mp_context': ctx} if ctx is not None else {}
+            with ProcessPoolExecutor(max_workers=workers, **kw) as ex:
+                for i, (path_str, parsed, err) in enumerate(
+                        ex.map(_parse_one, paths, chunksize=64), 1):
+                    absorb(path_str, parsed, err, i)
+                    if len(races) >= batch_size:
+                        s = _flush(man_rows, races, horses, warehouse)
+                        n_races += s['races']; n_results += s['results']
+                        touched |= set(s['partitions'])
+                        races, horses = [], []
+                    if progress and i % 500 == 0:
+                        progress(i, total, 'parse')
+        except Exception as e:  # noqa: BLE001
+            # 並列が使えない環境でも止まらないよう、逐次に落とす
+            print(f'⚠️ 並列実行に失敗したため逐次実行に切り替えます: '
+                  f'{type(e).__name__}: {str(e)[:120]}', flush=True)
+            races, horses, man_rows = [], [], []
+            n_races = n_results = failed = 0
+            touched = set()
+            for i, path_str in enumerate(paths, 1):
+                _, parsed, err = _parse_one(path_str)
                 absorb(path_str, parsed, err, i)
                 if len(races) >= batch_size:
                     s = _flush(man_rows, races, horses, warehouse)
-                    n_races += s['races']; n_results += s['results']; touched |= set(s['partitions'])
+                    n_races += s['races']; n_results += s['results']
+                    touched |= set(s['partitions'])
                     races, horses = [], []
                 if progress and i % 500 == 0:
                     progress(i, total, 'parse')

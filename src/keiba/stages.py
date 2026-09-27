@@ -68,7 +68,8 @@ netkeiba の db サイトは結果の反映が遅れる。実際に 2026-09-27 �
 
 def collect(start: Optional[dt.date] = None, end: Optional[dt.date] = None,
             push: bool = True, dry_run: bool = False,
-            lookback_days: int = LOOKBACK_DAYS) -> Dict:
+            lookback_days: int = LOOKBACK_DAYS,
+            race_ids: Optional[List[str]] = None) -> Dict:
     """未取得のレースHTMLを収集して GitHub に保存する。
 
     Args:
@@ -76,6 +77,8 @@ def collect(start: Optional[dt.date] = None, end: Optional[dt.date] = None,
         end: 収集終了日。None なら今日。
         dry_run: 検知だけ行い、ダウンロードはしない。
         lookback_days: 自動決定時にさかのぼる日数。反映遅れ対策。
+        race_ids: 指定すると日付による検知を行わず、この race_id だけを取得する。
+            `audit.local()` が見つけた欠番を埋めるときに使う。
     """
     import pandas as pd
     from collections import Counter
@@ -89,6 +92,9 @@ def collect(start: Optional[dt.date] = None, end: Optional[dt.date] = None,
     if not diag.startswith('ok'):
         print('⚠️ この環境からは取得できません。中断します。')
         return {'stage': 'collect', 'ok': False, 'reason': diag}
+
+    if race_ids is not None:
+        return _collect_ids(list(race_ids), fetcher, push=push, dry_run=dry_run)
 
     races = store.read_table('races', columns=['race_id', 'date'])
     known = set(races['race_id'].astype(str)) if not races.empty else set()
@@ -147,6 +153,31 @@ def collect(start: Optional[dt.date] = None, end: Optional[dt.date] = None,
             'outcomes': {k.value: v for k, v in outcomes.items()}}
 
 
+def _collect_ids(race_ids: List[str], fetcher, push: bool = True,
+                 dry_run: bool = False) -> Dict:
+    """race_id を指定して取得する（欠番の穴埋め用）。"""
+    from collections import Counter
+    from . import config, fetch, gitpush
+
+    print(f'指定された {len(race_ids)} 件を取得します')
+    if dry_run:
+        for r in race_ids:
+            print(f'  {r}')
+        return {'stage': 'collect', 'ok': True, 'found': len(race_ids), 'saved': 0}
+
+    outcomes: Counter = Counter()
+    for race_id in race_ids:
+        o = fetcher.download_race(race_id, config.HTML_DIR)
+        outcomes[o] += 1
+        print(f'  {race_id}: {o.value}', flush=True)
+
+    saved = outcomes.get(fetch.Outcome.SAVED, 0)
+    if push and saved:
+        gitpush.push(['data/html'], f'Add {saved} race HTML files (gap fill)')
+    return {'stage': 'collect', 'ok': True, 'found': len(race_ids), 'saved': saved,
+            'outcomes': {k.value: v for k, v in outcomes.items()}}
+
+
 # ---------------------------------------------------------------------------
 # 2. パース
 # ---------------------------------------------------------------------------
@@ -177,6 +208,12 @@ def build(push: bool = True, workers: Optional[int] = None) -> Dict:
 
     store.build_duckdb()
     print('DuckDB のビューを更新しました')
+
+    from . import audit
+    print()
+    rep = audit.local()
+    rep.print_report(max_list=10)
+    result['audit_gaps'] = rep.gaps
 
     if push and result['parsed']:
         gitpush.push(['data/warehouse'], 'Update warehouse')

@@ -189,6 +189,34 @@ def test_discovery_filters_to_jra():
     check('ウェアハウスに中央以外が無い', len(non_jra) == 0, f'{len(non_jra)} 件')
 
 
+def test_audit():
+    print('\n[抜けの検出]')
+    from keiba import audit
+
+    rep = audit.local()
+    check('開催日を数えている', rep.n_race_days > 4000, f'{rep.n_race_days:,} 日')
+    check('内部の欠番が無い', not rep.gaps, f'{len(rep.gaps)} 件: {rep.gaps[:5]}')
+    check('HTMLが無いレースが無い', not rep.warehouse_without_html,
+          f'{len(rep.warehouse_without_html)} 件')
+    check('ok 判定が立つ', rep.ok)
+
+    # 欠番を作って検出できることを確かめる
+    import pandas as pd
+    from keiba import audit as A
+
+    fake = pd.DataFrame({'race_id': [f'202605010{n:02d}' for n in
+                                     [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12]]})
+    fake['prefix'] = fake['race_id'].str[:10]
+    fake['rn'] = pd.to_numeric(fake['race_id'].str[10:12])
+    nums = set(fake['rn'])
+    gaps = [n for n in range(1, max(nums)) if n not in nums]
+    check('欠番（4R抜け）を検出できる', gaps == [4], f'{gaps}')
+
+    check('race_id を人が読める形に直せる',
+          A._describe('202505021109') == '2025年 東京 2回11日 9R',
+          A._describe('202505021109'))
+
+
 def test_pipeline_range():
     print('\n[ステージの範囲指定]')
     from keiba import pipeline, stages
@@ -253,7 +281,8 @@ def main():
     for fn in [test_manifest_roundtrip, test_parser_version_triggers_reparse,
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
-               test_discovery_filters_to_jra, test_pipeline_range, test_duckdb,
+               test_discovery_filters_to_jra, test_audit,
+               test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()
     print('\n' + '=' * 50)

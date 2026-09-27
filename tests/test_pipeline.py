@@ -122,6 +122,24 @@ def test_features():
     check('race_id を外すと不定になる（旧実装の再現）', unstable)
 
 
+def test_discovery_filters_to_jra():
+    print('\n[中央競馬への絞り込み]')
+    from keiba import discovery
+
+    check('中央の場コードを中央と判定',
+          all(discovery.is_jra(f'2026{c}010101') for c in discovery.JRA_VENUES))
+    # 2026-01-04 のレース一覧に実際に並んでいた地方の場コード
+    check('地方の場コードを除外',
+          not any(discovery.is_jra(f'2026{c}010401') for c in ('45', '48', '55', '65')))
+    check('桁数が違うものは弾く', not discovery.is_jra('20260101'))
+    check('場名が引ける', discovery.venue_name('202605010101') == '東京')
+
+    # ウェアハウスに中央以外が混入していないこと
+    ids = store.existing_race_ids()
+    non_jra = [i for i in ids if not discovery.is_jra(i)]
+    check('ウェアハウスに中央以外が無い', len(non_jra) == 0, f'{len(non_jra)} 件')
+
+
 def test_duckdb():
     print('\n[DuckDB]')
     try:
@@ -159,7 +177,8 @@ def test_store_upsert_is_isolated():
 def main():
     for fn in [test_manifest_roundtrip, test_parser_version_triggers_reparse,
                test_warehouse_integrity, test_validate_rejects_empty_pages,
-               test_features, test_duckdb, test_store_upsert_is_isolated]:
+               test_features, test_discovery_filters_to_jra, test_duckdb,
+               test_store_upsert_is_isolated]:
         fn()
     print('\n' + '=' * 50)
     if FAILS:

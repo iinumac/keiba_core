@@ -83,6 +83,48 @@ def test_validate_rejects_empty_pages():
                           'horses': [{}]}) is None)
 
 
+def test_course_notation():
+    """コース表記の取りこぼしがないこと。
+
+    旧パーサは方向の後を1文字ぶんしか見ておらず、776レースで surface と
+    distance が None になっていた。新潟の1000m戦は1件もデータに入っておらず、
+    中山のステイヤーズS（芝右 内2周3600m）も16年分すべて欠落していた。
+
+    全HTMLを走査してコース表記は14種類と確認済み。下の式は全種を解析できる。
+    """
+    print('\n[コース表記の解析]')
+    from keiba.parse import COURSE_RE as pat
+
+    cases = [
+        ('ダ左1400m',        'ダ',   '左', '',      1400),
+        ('芝右1600m',        '芝',   '右', '',      1600),
+        ('芝右 外1600m',     '芝',   '右', '外',    1600),
+        ('芝左 内2000m',     '芝',   '左', '内',    2000),
+        ('芝直線1000m',      '芝',   '',   '直線',  1000),
+        ('障芝 外-内2890m',  '芝',   '',   '外-内', 2890),
+        ('芝右 内2周3600m',  '芝',   '右', '内2周', 3600),
+        ('障芝 内-外3350m',  '芝',   '',   '内-外', 3350),
+    ]
+    for text, surface, direction, course, dist in cases:
+        m = pat.search(text)
+        ok = (m is not None
+              and m.group(2).startswith(surface[0])
+              and (m.group(3) or '') == direction
+              and m.group(4).strip() == course
+              and int(m.group(5)) == dist)
+        check(f'{text}', ok, '' if ok else f'→ {m.groups() if m else None}')
+
+    # ウェアハウス側の結果
+    races = store.read_table('races', columns=['venue_name', 'distance',
+                                               'surface', 'course_type'])
+    nii_1000 = ((races['venue_name'] == '新潟') & (races['distance'] == 1000)).sum()
+    check('新潟の1000m戦がデータに入っている', nii_1000 > 0, f'{nii_1000} レース')
+    n_3600 = (races['distance'] == 3600).sum()
+    check('中山3600m（ステイヤーズS）が入っている', n_3600 > 0, f'{n_3600} レース')
+    n_null = int(races['distance'].isna().sum())
+    check('距離が欠損しているレースが無い', n_null == 0, f'{n_null} 件')
+
+
 def test_features():
     print('\n[特徴量]')
     races, results = store.load_for_features(years=[2024, 2025])
@@ -94,8 +136,15 @@ def test_features():
     check('C03 の特徴量が生成される', 'horse_expected_top3_rate' in df3.columns)
     check('C04 の市場系特徴量が生成される', 'odds_ratio_to_fav' in df4.columns)
     check('別名が同値', df4['horse_prev_top3_rate'].equals(df4['horse_expected_top3_rate']))
-    check('C03/C04 で surface の埋め値が異なる（設定が効いている）',
-          df3['surface_encoded'].min() == -1 and df4['surface_code'].min() == 0)
+    # 設定が効いていること。surface はコース表記の修正で欠損が無くなったため、
+    # 埋め値では差が出なくなった。クレンジング条件の違いで見る。
+    #   C03: 特定騎手を除外し、着順が数値でない行は残す
+    #   C04: 騎手を除外せず、着順が数値でない行を落とす
+    check('C03/C04 で対象行数が異なる（設定が効いている）',
+          len(df3) != len(df4), f'C03 {len(df3):,} / C04 {len(df4):,}')
+    check('新馬の初期値が設定どおり異なる',
+          round(float(df3.loc[df3['is_debut'] == 1, 'horse_expected_top3_rate'].iloc[0]), 4)
+          != round(float(df4.loc[df4['is_debut'] == 1, 'horse_expected_top3_rate'].iloc[0]), 4))
 
     # 旧プロジェクトは sort_values('race_date') だけで最新行を取っており、
     # 同一日に複数レースがある騎手でどの行を拾うかが入力の行順で変わっていた。
@@ -177,7 +226,8 @@ def test_store_upsert_is_isolated():
 def main():
     for fn in [test_manifest_roundtrip, test_parser_version_triggers_reparse,
                test_warehouse_integrity, test_validate_rejects_empty_pages,
-               test_features, test_discovery_filters_to_jra, test_duckdb,
+               test_course_notation, test_features,
+               test_discovery_filters_to_jra, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()
     print('\n' + '=' * 50)

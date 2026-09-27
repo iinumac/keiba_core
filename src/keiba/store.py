@@ -195,11 +195,17 @@ def build_duckdb(db_path: Optional[Path] = None,
     return db_path
 
 
-def connect(db_path: Optional[Path] = None):
-    """分析用の接続を開く。ビューが無ければ作ってから返す。"""
+def connect(db_path: Optional[Path] = None,
+            warehouse: Optional[Path] = None):
+    """分析用の接続を開く。
+
+    ビューは毎回張り直す。Parquet の列の型が変わる（distance が欠損を
+    含む DOUBLE から BIGINT になる等）と、保存済みのビュー定義と食い違って
+    "Contents of view were altered" で読めなくなるため。
+    ビュー定義のみなので作り直しのコストは無視できる。
+    """
     import duckdb
 
     db_path = db_path or config.DUCKDB_PATH
-    if not db_path.exists():
-        build_duckdb(db_path)
+    build_duckdb(db_path, warehouse)
     return duckdb.connect(str(db_path))

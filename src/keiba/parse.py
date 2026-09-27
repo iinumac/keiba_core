@@ -15,6 +15,23 @@ from bs4 import BeautifulSoup
 from typing import Dict, List, Optional, Tuple
 
 
+COURSE_RE = re.compile(
+    r'(障)?(芝|ダ(?:ート)?)\s*(右|左)?\s*((?:[外内直線\-\s]|\d+周)*)(\d+)m')
+"""コース表記から 障害/馬場/回り/コース区分/距離 を取り出す。
+
+全HTML（54,889件）を走査した結果、表記は14種類あり、いずれもこの式で解析できる。
+
+    ダ右1400m / 芝左2000m / 芝右 外1600m / 芝左 内2000m
+    芝直線1000m      新潟の直線コース。「直線」で2文字
+    障芝 外-内2890m  障害戦。コース区分がハイフンで連結される
+    芝右 内2周3600m  中山のステイヤーズS。距離の前に「2周」が入る
+    障芝 ダート3000m 障害戦の芝・ダート混合
+
+旧実装は方向の後を1文字ぶんしか見ておらず、776レースで surface と distance が
+None になっていた。テストから参照するため、ここに定数として置く（二重管理を避ける）。
+"""
+
+
 def classify_race_level(prize_money: float) -> Tuple[str, int]:
     """
     1着賞金からレースレベルを分類
@@ -155,17 +172,22 @@ def parse_race_html_full(html_path: Path) -> Dict:
             info_text = span.text.strip()
             
             # 距離・コース
-            # パターン例: "芝右1600m", "ダ右1200m", "芝右 外1600m", "芝左 内2000m", "障芝3000m"
-            match = re.search(r'(障)?(芝|ダ(?:ート)?)\s*(右|左)?\s*(外|内|直)?(?:\s*(外|内|直))?\s*(\d+)m', info_text)
+            # 実際に現れる表記:
+            #   "芝右1600m" "ダ右1200m" "芝右 外1600m" "芝左 内2000m"
+            #   "芝直線1000m"      新潟の直線コース。「直線」で2文字
+            #   "障芝 外-内2890m"  障害戦。コース区分がハイフンで連結される
+            #   "芝右 内2周3600m"  中山のステイヤーズS。距離の前に「2周」が入る
+            # 旧実装は方向の後を (外|内|直) 1文字ぶんしか見ておらず、
+            # distance も surface も None になっていた。
+            # 全HTMLを走査した結果、コース表記は14種類あり、下の式で全て解析できる。
+            match = COURSE_RE.search(info_text)
             if match:
                 is_obstacle = match.group(1) is not None  # 障害レース
                 surface = match.group(2)
                 race_info['surface'] = 'ダート' if surface.startswith('ダ') else surface
                 race_info['direction'] = match.group(3) or ''
-                # 外/内/直 は group(4) または group(5) に入る
-                course_type = match.group(4) or match.group(5) or ''
-                race_info['course_type'] = course_type
-                race_info['distance'] = int(match.group(6))
+                race_info['course_type'] = match.group(4).strip()
+                race_info['distance'] = int(match.group(5))
             
             # 天候
             weather_match = re.search(r'天候\s*[:：]\s*(\S+)', info_text)

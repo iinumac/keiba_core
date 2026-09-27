@@ -40,13 +40,30 @@ df = pd.read_parquet('data/warehouse/results/year=2025/part.parquet')
 
 | | 役割 | 出力 |
 |---|---|---|
-| [`01_collect`](notebooks/01_collect.ipynb) | 新しいレースを検知して HTML を取得 | `data/html/YYYY/*.html` |
-| [`02_build`](notebooks/02_build.ipynb) | 増えた分だけパースしてウェアハウスを更新 | `data/warehouse/` |
-| [`03_train`](notebooks/03_train.ipynb) | 3着内確率モデルの学習 | `models/`, `data/master/` |
-| [`04_strategy`](notebooks/04_strategy.ipynb) | 三連複の期待値・買い目 | 画面出力 |
-| [`90_analysis`](notebooks/90_analysis.ipynb) | SQL による自由分析 | — |
+| [`00_run`](notebooks/00_run.ipynb) | **1〜4 を範囲指定してまとめて実行** | — |
+| [`01_collect`](notebooks/01_collect.ipynb) | 1. 取り込み — 新しいレースを検知して HTML を取得 | `data/html/YYYY/*.html` |
+| [`02_build`](notebooks/02_build.ipynb) | 2. パース — 増えた分だけウェアハウスへ | `data/warehouse/` |
+| [`03_train`](notebooks/03_train.ipynb) | 3. 学習 — 3着内確率モデルとマスタ | `models/`, `data/master/` |
+| [`04_strategy`](notebooks/04_strategy.ipynb) | 4. 予想 — 三連複の戦略評価と買い目 | 画面出力 |
+| [`90_analysis`](notebooks/90_analysis.ipynb) | 分析 — SQL による自由分析（独立） | — |
 
-各ノートブックは成果物を GitHub に保存し、次のノートブックはそれを取りに行く。
+01〜04 が一本のパイプライン、90 はそれを横から覗く道具。
+
+**処理の実体は `src/keiba/stages.py` にあり、00_run も 01〜04 も同じ関数を呼ぶ。**
+ノートブック側にロジックを書かないのは、片方だけ直して食い違う事故を避けるため。
+
+```python
+from keiba import pipeline
+
+pipeline.run(1, 4)          # 取り込み → パース → 学習 → 予想
+pipeline.run(2, 3)          # パースと学習だけ
+pipeline.run('train', 4)    # 名前でも指定できる
+```
+
+途中の段が失敗したらそこで止まる。前の段の出力が次の段の入力になるため、
+失敗を無視して進めると壊れたデータで学習してしまう。
+
+各段は成果物を GitHub に保存し、次の段はそれを取りに行く。
 **別タブ・別ランタイムで実行してよい。**
 
 ---
@@ -88,6 +105,12 @@ data/warehouse/manifest.parquet                 ← 何をどう解析したか�
 
 レース一覧ページには**地方競馬も並んでいる**ため、中央（JRA）の10場に絞る。
 2026-01-04 は全69レース中、中央は24件（中山12・京都12）だけだった。
+
+開始日を自動で決めるときは、手持ちの最新日から **14日さかのぼって**確認する。
+db.netkeiba は結果の反映が遅れることがあり（2026-09-27 時点で 9/26 の中央は
+未反映だった）、「最新日の翌日から」にすると反映前に通過した日が
+二度と見られなくなるため。取得済みの race_id は除外されるので、
+増えるのは開催日ぶんのリクエストだけ。
 
 ### 2. 毎回パースしない
 

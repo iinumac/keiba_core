@@ -2,7 +2,13 @@
 
     from keiba import build, store, discovery, fetch, features
 
-典型的な流れ:
+連続実行:
+
+    from keiba import pipeline
+    pipeline.run(1, 4)      # 取り込み → パース → 学習 → 予想
+    pipeline.run(2, 3)      # パースと学習だけ
+
+個別に呼ぶ場合:
 
     # 1. 新しいレースを検知して取得
     f = fetch.Fetcher()
@@ -19,7 +25,7 @@
 """
 
 from . import (config, manifest, store, build, discovery, fetch,  # noqa: F401
-               features, parse, gitpush, strategy)
+               features, parse, gitpush, strategy, stages, pipeline)
 
 __all__ = ['config', 'manifest', 'store', 'build', 'discovery', 'fetch',
-           'features', 'parse', 'gitpush', 'strategy']
+           'features', 'parse', 'gitpush', 'strategy', 'stages', 'pipeline']

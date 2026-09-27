@@ -189,6 +189,32 @@ def test_discovery_filters_to_jra():
     check('ウェアハウスに中央以外が無い', len(non_jra) == 0, f'{len(non_jra)} 件')
 
 
+def test_pipeline_range():
+    print('\n[ステージの範囲指定]')
+    from keiba import pipeline, stages
+
+    check('番号で指定できる', pipeline._resolve(1) == 'collect')
+    check('文字列の番号でも指定できる', pipeline._resolve('2') == 'build')
+    check('名前で指定できる', pipeline._resolve('train') == 'train')
+
+    for bad in (0, 5, 'unknown'):
+        try:
+            pipeline._resolve(bad)
+            check(f'不正な指定 {bad!r} を拒否', False)
+        except ValueError:
+            check(f'不正な指定 {bad!r} を拒否', True)
+
+    try:
+        pipeline.run(3, 1)
+        check('開始が終了より後なら拒否', False)
+    except ValueError:
+        check('開始が終了より後なら拒否', True)
+
+    check('ステージは4段', stages.STAGES == ['collect', 'build', 'train', 'strategy'])
+    check('全ステージにラベルがある',
+          all(s in stages.STAGE_LABELS for s in stages.STAGES))
+
+
 def test_duckdb():
     print('\n[DuckDB]')
     try:
@@ -227,7 +253,7 @@ def main():
     for fn in [test_manifest_roundtrip, test_parser_version_triggers_reparse,
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
-               test_discovery_filters_to_jra, test_duckdb,
+               test_discovery_filters_to_jra, test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()
     print('\n' + '=' * 50)

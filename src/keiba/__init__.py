@@ -26,8 +26,8 @@
 
 from . import (config, manifest, store, build, discovery, fetch,  # noqa: F401
                features, parse, gitpush, strategy, stages, pipeline,
-               audit)
+               audit, backtest)
 
 __all__ = ['config', 'manifest', 'store', 'build', 'discovery', 'fetch',
            'features', 'parse', 'gitpush', 'strategy', 'stages', 'pipeline',
-           'audit']
+           'audit', 'backtest']

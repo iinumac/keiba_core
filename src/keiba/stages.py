@@ -20,6 +20,8 @@ import datetime as dt
 import math
 from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
+
 STAGES = ['collect', 'build', 'train', 'strategy']
 STAGE_LABELS = {
     'collect': '1. 取り込み（HTML収集）',
@@ -29,6 +31,16 @@ STAGE_LABELS = {
 }
 
 TRAIN_END_YEAR = 2024
+
+TAKEOUT_BASELINE = {
+    '単勝': 80.0, '複勝': 80.0, '枠連': 77.5, '馬連': 77.5, 'ワイド': 77.5,
+    '馬単': 75.0, '三連複': 75.0, '三連単': 72.5,
+}
+"""100 - JRAの控除率。ランダムに買えば回収率はここに収束する。
+
+回収率を「100%を下回っているから駄目」と見るのではなく、
+この基準をどれだけ上回ったかがモデルの実力。
+"""
 
 FEATURES_NO_ODDS = [
     'distance', 'surface_encoded', 'level_score', 'impost',
@@ -302,30 +314,16 @@ def train(push: bool = True) -> Dict:
 # ---------------------------------------------------------------------------
 # 4. 予想（戦略評価）
 # ---------------------------------------------------------------------------
-def backtest(te, col: str, n_pick: int, ascending: bool = False,
-             min_runners: int = 8) -> Tuple[int, int, float]:
-    """3着内の3頭を買い目に含められたレースの数を数える。
+def strategy(push: bool = False, bet_types: Optional[List[str]] = None) -> Dict:
+    """買い目戦略を評価する。
 
-    回収率ではなく的中率であることに注意。払戻データがまだ無い。
-    """
-    hits = races_n = 0
-    fields: List[int] = []
-    for _, g in te.groupby('race_id'):
-        if len(g) < min_runners:
-            continue
-        actual = set(g[g['finish_position'] <= 3]['horse_number'])
-        if len(actual) < 3:
-            continue
-        races_n += 1
-        fields.append(len(g))
-        picks = set(g.sort_values(col, ascending=ascending).head(n_pick)['horse_number'])
-        if actual <= picks:
-            hits += 1
-    return races_n, hits, (sum(fields) / len(fields) if fields else 0.0)
+    **的中率と回収率を両方出す。** 的中率は点数を増やせば必ず上がるので
+    単独では判断できず、回収率はごく稀な超高配当に支配されうる
+    （実データの三連単には5,800万円の払戻がある）。
 
-
-def strategy(push: bool = False) -> Dict:
-    """三連複の戦略を評価する。
+    外れ値への依存度を見るため「最高配当1本を除いた回収率」も出す。
+    期待値がプラスでも的中率が低すぎると収束前に資金が尽きるので、
+    「回収率が100%超だと確認するのに必要なレース数」も併記する。
 
     買い目の選抜は**確率**で行う。「AI複勝率 × 単勝オッズ」を期待値として
     使うのは誤りで（単勝オッズは1着の配当、3着内の配当ではない）、
@@ -334,7 +332,7 @@ def strategy(push: bool = False) -> Dict:
     import numpy as np
     import lightgbm as lgb
     from sklearn.metrics import roc_auc_score
-    from . import store
+    from . import backtest, store
     from .features import build_features, C04_CONFIG
 
     _rule(STAGE_LABELS['strategy'])
@@ -361,26 +359,33 @@ def strategy(push: bool = False) -> Dict:
     print(f'  3着内モデル AUC {auc3:.4f} / 勝率モデル AUC {aucw:.4f}')
 
     te['pred_top3'] = model_top3.predict(te[feats])
-    te['ev_win_odds'] = te['pred_top3'] * te['odds']   # 参考値。選抜には使わない
+    te['race_id'] = te['race_id'].astype(str)
+    payouts = store.read_table('payouts')
+    payouts['race_id'] = payouts['race_id'].astype(str)
+    payouts = payouts[payouts['race_id'].isin(set(te['race_id']))]
 
-    print(f'\n{"選び方":<22}{"点数":>5}{"的中":>7}{"的中率":>9}{"ランダム":>9}{"倍率":>7}')
+    plans = bet_types or [('ワイド', 3), ('ワイド', 5), ('三連複', 5),
+                          ('三連複', 7), ('三連単', 5), ('馬連', 3)]
     rows = []
-    for label, col, asc in [('AI複勝確率', 'pred_top3', False),
-                            ('人気上位', 'popularity', True),
-                            ('AI複勝率×単勝オッズ', 'ev_win_odds', False)]:
-        for n in (5, 6, 7):
-            races_n, hits, field = backtest(te, col, n, ascending=asc)
-            pts = math.comb(n, 3)
-            rate = 100 * hits / races_n if races_n else 0
-            rnd = 100 * pts / math.comb(round(field), 3)
-            rows.append({'label': label, 'n_pick': n, 'points': pts,
-                         'hits': hits, 'rate': rate, 'random': rnd})
-            print(f'{label + f" {n}頭BOX":<22}{pts:>5}{hits:>7}{rate:>8.2f}%'
-                  f'{rnd:>8.2f}%{rate / rnd:>6.1f}x')
+    for bet, n in plans:
+        for col, lab, asc in [('pred_top3', 'AI', False),
+                              ('popularity', '人気', True)]:
+            r = backtest.run(te, payouts, label=f'{bet} {lab} {n}頭BOX',
+                             column=col, n_pick=n, bet_type=bet, ascending=asc)
+            row = r.as_row()
+            row['控除率後の基準%'] = TAKEOUT_BASELINE.get(bet)
+            if row['控除率後の基準%'] is not None:
+                row['上乗せpt'] = round(r.roi - row['控除率後の基準%'], 1)
+            rows.append(row)
 
-    print('\n※ 的中率は点数を増やせば必ず上がる。回収率で評価するには')
-    print('   払戻データの取り込みが必要（docs/MIGRATION.md 参照）。')
+    table = pd.DataFrame(rows)
+    print()
+    print(table.to_string(index=False))
+    print()
+    print(backtest.explain())
+    print('「控除率後の基準」はランダムに買ったときの収束先。'
+          'これを上回った分がモデルの実力で、100%に届いて初めて黒字になる。')
 
     return {'stage': 'strategy', 'ok': True, 'auc_top3': auc3, 'auc_win': aucw,
-            'backtest': rows, 'model_top3': model_top3, 'model_win': model_win,
+            'backtest': table, 'model_top3': model_top3, 'model_win': model_win,
             'features': feats, 'feature_df': df}

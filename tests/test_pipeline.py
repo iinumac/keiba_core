@@ -260,6 +260,46 @@ def test_payout_matches_odds():
     check('払戻の馬番がすべて結果に実在する', bad == 0, f'{bad} 件')
 
 
+def test_backtest():
+    """点数の数え方と、同着の合算。"""
+    print('\n[バックテスト]')
+    import pandas as pd
+    from keiba import backtest
+
+    # 着順が関係する券種を組み合わせ数で数えると点数を過少に見積もる。
+    # 実際にこれで三連単の回収率が439%と出た。
+    check('三連複 5頭BOX = 10点', backtest.points_for('三連複', 5) == 10)
+    check('三連単 5頭BOX = 60点（順列）', backtest.points_for('三連単', 5) == 60,
+          f"{backtest.points_for('三連単', 5)}")
+    check('馬連 5頭BOX = 10点', backtest.points_for('馬連', 5) == 10)
+    check('馬単 5頭BOX = 20点（順列）', backtest.points_for('馬単', 5) == 20)
+
+    # 同着のレースは当たりが複数行。合計する必要がある
+    te = pd.DataFrame({
+        'race_id': ['R1'] * 8,
+        'horse_number': [1, 2, 3, 4, 5, 6, 7, 8],
+        'finish_position': [1, 2, 3, 4, 5, 6, 7, 8],
+        'score': [8, 7, 6, 5, 4, 3, 2, 1],
+    })
+    pay = pd.DataFrame({
+        'race_id': ['R1', 'R1'],
+        'bet_type': ['三連複', '三連複'],
+        'horse_numbers': [[1, 2, 3], [1, 2, 4]],   # 3着同着のつもり
+        'payout': [1000, 2000],
+    })
+    r = backtest.run(te, pay, label='t', column='score', n_pick=4,
+                     bet_type='三連複', min_runners=8)
+    check('同着の払戻を合算する', r.payout == 3000, f'{r.payout}')
+    check('購入額は点数×100', r.cost == 4 * 100, f'{r.cost}')
+
+    # 買い目に含まれない組み合わせは当たりにしない
+    r2 = backtest.run(te, pay, label='t', column='score', n_pick=3,
+                      bet_type='三連複', min_runners=8)
+    check('買い目外は当たりにしない', r2.payout == 1000, f'{r2.payout}')
+
+    check('必要レース数は赤字なら None', r2.races_to_confirm is None)
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -353,7 +393,7 @@ def main():
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
                test_discovery_filters_to_jra, test_payouts,
-               test_payout_matches_odds, test_audit,
+               test_payout_matches_odds, test_backtest, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

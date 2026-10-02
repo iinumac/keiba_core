@@ -16,6 +16,8 @@ DataFrame 全体をベクトル演算で処理する。
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -239,6 +241,30 @@ def add_speed_features(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=['_t_raw', '_l_raw'])
 
 
+MARGIN_WORDS = {'ハナ': 0.05, 'アタマ': 0.1, 'クビ': 0.2, '同着': 0.0, '大': 10.0}
+_MARGIN_FRAC = re.compile(r'(\d+)?\.?(\d+)/(\d+)')
+
+
+def margin_to_lengths(value) -> float:
+    """着差の表記を馬身に直す。
+
+    netkeiba は「クビ」「1/2」「1.1/4」「大」のように書く。
+    "1.1/4" は 1 と 1/4 で 1.25 馬身。
+    """
+    s = str(value).strip()
+    if not s or s == 'nan':
+        return np.nan
+    if s in MARGIN_WORDS:
+        return MARGIN_WORDS[s]
+    m = _MARGIN_FRAC.fullmatch(s.replace(' ', ''))
+    if m:
+        return float(m.group(1) or 0) + float(m.group(2)) / float(m.group(3))
+    try:
+        return float(s)
+    except ValueError:
+        return np.nan
+
+
 def add_recency_features(df: pd.DataFrame) -> pd.DataFrame:
     """前走・前々走の「人気と着順のズレ」から、市場の過剰反応を捉える。
 
@@ -250,14 +276,22 @@ def add_recency_features(df: pd.DataFrame) -> pd.DataFrame:
 
         gap = 前走着順 - 前走人気
 
-    実データで、同じ人気帯の平均回収率との差（超過pt）:
+    実データで、同じ人気帯の平均回収率との差（超過pt）。いずれも有意:
 
         前走13番人気以下 × 2-3着（人気薄で激走）   -6.6pt  過大評価
         前走1番人気 × 9-13着（1番人気で大敗）      -5.9pt  過大評価
         前走4-6番人気 × 9-13着（地味に凡走）       +3.9pt  過小評価
-        前走7-12番人気 × 4-8着                   +1.8pt  過小評価
 
-    いずれも統計的に有意。**良くも悪くも目立った馬は過大評価される。**
+    同じ「目立った実績への過剰反応」は他の軸でも出る:
+
+        2走連続勝利                              -8.5pt  過大評価
+        前走5馬身以上の大敗                       -10.5pt  過大評価
+        1年以上の休み明け                        -20.3pt  過大評価
+        前走クビ・ハナ差負け                       +2.0pt  過小評価
+        6-8週の間隔                              +3.8pt  過小評価
+        3走とも着外                               +1.1pt  過小評価
+
+    **良くも悪くも目立った馬は過大評価され、地味な馬は過小評価される。**
 
     これらは前走の人気を使うので、市場情報を部分的に含む。
     `MARKET_FREE_FEATURES` には入れない。
@@ -276,6 +310,42 @@ def add_recency_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f'p{k}_surprise'] = df[f'p{k}_gap'].abs()
 
     df['gap_mean2'] = df[['p1_gap', 'p2_gap']].mean(axis=1)
+
+    # --- 前走の着差。僅差負けは過小評価、大差負けは過大評価される ---
+    #   クビ・ハナ差負け  +2.0pt
+    #   5馬身以上負け    -10.5pt
+    if 'margin' in df.columns:
+        uniq = pd.Series(df['margin'].astype(str).unique())
+        conv = dict(zip(uniq, uniq.map(margin_to_lengths)))
+        df['margin_len'] = df['margin'].astype(str).map(conv)
+        df['p1_margin'] = g['margin_len'].shift(1)
+    else:
+        df['margin_len'] = np.nan
+        df['p1_margin'] = np.nan
+
+    # --- 連続好走・連続凡走。連勝中の馬は買われすぎる ---
+    #   2走連続勝利   -8.5pt
+    #   3走とも着外   +1.1pt
+    df['p3_fin'] = g['_fin'].shift(3)
+    t = [df[c] <= 3 for c in ('p1_fin', 'p2_fin', 'p3_fin')]
+    df['streak_top3'] = (t[0].fillna(False).astype(int)
+                         + (t[0] & t[1]).fillna(False).astype(int)
+                         + (t[0] & t[1] & t[2]).fillna(False).astype(int))
+    df['streak_win'] = ((df['p1_fin'] == 1).fillna(False).astype(int)
+                        + ((df['p1_fin'] == 1) & (df['p2_fin'] == 1)).fillna(False).astype(int))
+
+    # --- 騎手の格。乗り替わりで上がったか下がったか ---
+    # 過去の騎乗数を格の代理とする（cumcount なので当該レースを含めない）
+    if 'jockey_id' in df.columns:
+        df = df.sort_values(by=['jockey_id', 'race_date'])
+        df['jockey_rides'] = df.groupby('jockey_id').cumcount()
+        df = df.sort_values(by=['horse_id', 'race_date'])
+        df['jockey_rides_delta'] = (df['jockey_rides']
+                                    - df.groupby('horse_id')['jockey_rides'].shift(1))
+    else:
+        df['jockey_rides'] = np.nan
+        df['jockey_rides_delta'] = np.nan
+
     return df.drop(columns=['_pop', '_fin'])
 
 

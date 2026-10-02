@@ -82,6 +82,7 @@ MARKET_FREE_FEATURES = [
 RECENCY_FEATURES = [
     'p1_pop', 'p1_fin', 'p1_gap', 'p1_surprise',
     'p2_pop', 'p2_fin', 'p2_gap', 'p2_surprise', 'gap_mean2',
+    'p1_margin', 'streak_top3', 'streak_win', 'jockey_rides_delta',
 ]
 """前走・前々走の人気と着順のズレ。市場の過剰反応を捉える。
 

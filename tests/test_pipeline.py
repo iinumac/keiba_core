@@ -399,6 +399,31 @@ def test_recency_features():
     check('recency は市場フリーに入れない',
           not (set(stages.RECENCY_FEATURES) & set(stages.MARKET_FREE_FEATURES)))
 
+    # 着差の表記 → 馬身
+    from keiba.features import margin_to_lengths as ml
+    for text, want in [('ハナ', 0.05), ('クビ', 0.2), ('1/2', 0.5),
+                       ('1.1/4', 1.25), ('2.1/2', 2.5), ('3', 3.0), ('大', 10.0)]:
+        got = ml(text)
+        check(f'着差 {text} → {want}', abs(got - want) < 1e-9, f'{got}')
+    check('空欄は欠損', pd.isna(ml('')))
+
+    # 市場が買いすぎ / 見落としている馬の判定
+    cand = pd.DataFrame({
+        'p1_pop': [1, 5, 5, 5, 5, 5],
+        'p1_fin': [10, 1, 5, 2, 5, 5],
+        'p2_fin': [5, 1, 5, 5, 5, 5],
+        'p1_margin': [1.0, 1.0, 10.0, 0.1, 0.1, 0.1],
+        'days_since_last': [30, 30, 30, 50, 400, 50],
+    })
+    over = list(sg.overvalued(cand))
+    check('1番人気で大敗 → 買いすぎ', over[0])
+    check('2走連続勝利 → 買いすぎ', over[1])
+    check('前走5馬身以上の大敗 → 買いすぎ', over[2])
+    check('1年以上の休み明け → 買いすぎ', over[4])
+    under = list(sg.undervalued(cand))
+    check('適度な間隔＋僅差負け → 見落とし', under[5], str(under))
+    check('休み明けは見落としに含めない', not under[4])
+
 
 def test_market():
     """市場の見立てを3着内確率に揃える計算。"""

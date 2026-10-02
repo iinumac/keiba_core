@@ -130,24 +130,67 @@ def cross_roi(df: pd.DataFrame, by: str, payout_col: str = 'fuku',
     return pd.DataFrame(rows)
 
 
-def overvalued_after_last_race(df: pd.DataFrame) -> pd.Series:
-    """市場が前走に過剰反応して買われすぎている馬を判定する。
+def overvalued(df: pd.DataFrame) -> pd.Series:
+    """市場が買いすぎている馬。
 
-    同じ人気帯の平均回収率と比べて有意に劣るグループ。実データでは
-    この集団の複勝回収率は 54.8%（全体 74.5%）。
+    同じ人気帯の平均回収率と比べて有意に劣るグループを集めたもの。
+    「良くも悪くも目立った実績」に市場が過剰反応する。
 
-      前走13番人気以下 × 14着以下   超過 -10.9pt
-      前走13番人気以下 × 2-3着      超過  -6.6pt （人気薄で激走した反動）
-      前走1番人気 × 9-13着          超過  -5.9pt （1番人気で大敗した反動）
+      前走13番人気以下 × 14着以下    -10.9pt
+      前走13番人気以下 × 2-3着        -6.6pt （人気薄で激走した反動）
+      前走1番人気 × 9-13着            -5.9pt （1番人気で大敗した反動）
+      2走連続勝利                     -8.5pt （連勝中は買われすぎ）
+      2走連続3着内                    -3.6pt
+      前走5馬身以上の大敗            -10.5pt
+      6か月以上の休み明け             -8.1pt （1年以上だと -20.3pt）
 
-    除外すると全体の回収率は 74.5% → 75.8%。
-    効果は人気薄に集中する（9番人気以下で 67.0% → 69.2%）。
+    この集団の複勝回収率は 67.1%（全体 74.5%）。
+    除外すると全体が 76.4% に上がる。効果は人気薄に集中
+    （9番人気以下で 67.0% → 70.8%）。
     """
     p1_pop = pd.to_numeric(df.get('p1_pop'), errors='coerce')
     p1_fin = pd.to_numeric(df.get('p1_fin'), errors='coerce')
-    return (((p1_pop >= 13) & (p1_fin >= 14))
+    p2_fin = pd.to_numeric(df.get('p2_fin'), errors='coerce')
+    margin = pd.to_numeric(df.get('p1_margin'), errors='coerce')
+    rest = pd.to_numeric(df.get('days_since_last'), errors='coerce')
+
+    cond = (((p1_pop >= 13) & (p1_fin >= 14))
             | ((p1_pop >= 13) & p1_fin.between(2, 3))
-            | ((p1_pop == 1) & p1_fin.between(9, 13))).fillna(False)
+            | ((p1_pop == 1) & p1_fin.between(9, 13))
+            | ((p1_fin == 1) & (p2_fin == 1))
+            | ((p1_fin <= 3) & (p2_fin <= 3))
+            | ((p1_fin > 1) & (margin > 5))
+            | (rest >= 180))
+    return cond.fillna(False)
+
+
+def undervalued(df: pd.DataFrame) -> pd.Series:
+    """市場が見落としている馬。
+
+    「地味」な馬が過小評価される。適度な間隔で、惜敗または目立たず凡走。
+
+      6-8週の間隔          +3.8pt
+      9-12週の間隔         +3.0pt
+      前走クビ・ハナ差負け  +2.0pt
+      3走とも着外          +1.1pt
+
+    この集団の複勝回収率は 77.2%。人気帯別に見ると効果が大きい。
+
+      1-3番人気   86.4%（同人気平均 83.0%、+3.4pt）
+      4-8番人気   83.9%（同 78.3%、**+5.6pt**）
+    """
+    p1_fin = pd.to_numeric(df.get('p1_fin'), errors='coerce')
+    p2_fin = pd.to_numeric(df.get('p2_fin'), errors='coerce')
+    margin = pd.to_numeric(df.get('p1_margin'), errors='coerce')
+    rest = pd.to_numeric(df.get('days_since_last'), errors='coerce')
+
+    close_loss = (p1_fin > 1) & (margin <= 0.2)
+    quiet = (p1_fin > 3) & (p2_fin > 3)
+    return (rest.between(36, 90) & (close_loss | quiet)).fillna(False)
+
+
+# 旧名。既存の呼び出しが壊れないように残す
+overvalued_after_last_race = overvalued
 
 
 def attach_place_payout(df: pd.DataFrame, payouts: pd.DataFrame) -> pd.DataFrame:

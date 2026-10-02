@@ -77,6 +77,12 @@ class FeatureConfig:
     レース内で正規化するため集計に数十秒かかる。不要なら False。
     """
 
+    recency_features: bool = True
+    """前走・前々走の「人気と着順のズレ」を作るか。
+
+    前走の人気を使うため市場情報を部分的に含む。
+    """
+
     # --- 市場（オッズ）系特徴量 ---
     market_features: bool = False
     takeout_rate: float = 0.2
@@ -233,6 +239,46 @@ def add_speed_features(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=['_t_raw', '_l_raw'])
 
 
+def add_recency_features(df: pd.DataFrame) -> pd.DataFrame:
+    """前走・前々走の「人気と着順のズレ」から、市場の過剰反応を捉える。
+
+    市場は直近の目立った結果に引きずられる。1番人気で大敗した馬も、
+    人気薄で激走した馬も、次走では**過大評価される**。
+    逆に地味に凡走した馬は過小評価される。
+
+    人気より着順が悪ければ正、良ければ負:
+
+        gap = 前走着順 - 前走人気
+
+    実データで、同じ人気帯の平均回収率との差（超過pt）:
+
+        前走13番人気以下 × 2-3着（人気薄で激走）   -6.6pt  過大評価
+        前走1番人気 × 9-13着（1番人気で大敗）      -5.9pt  過大評価
+        前走4-6番人気 × 9-13着（地味に凡走）       +3.9pt  過小評価
+        前走7-12番人気 × 4-8着                   +1.8pt  過小評価
+
+    いずれも統計的に有意。**良くも悪くも目立った馬は過大評価される。**
+
+    これらは前走の人気を使うので、市場情報を部分的に含む。
+    `MARKET_FREE_FEATURES` には入れない。
+    """
+    df = df.sort_values(by=['horse_id', 'race_date']).copy()
+    pop = pd.to_numeric(df['popularity'], errors='coerce')
+    fin = pd.to_numeric(df['finish_position'], errors='coerce')
+    df['_pop'], df['_fin'] = pop, fin
+    g = df.groupby('horse_id')
+
+    for k in (1, 2):
+        df[f'p{k}_pop'] = g['_pop'].shift(k)
+        df[f'p{k}_fin'] = g['_fin'].shift(k)
+        df[f'p{k}_gap'] = df[f'p{k}_fin'] - df[f'p{k}_pop']
+        # 良くも悪くも「目立った」度合い。市場の記憶に残りやすさ
+        df[f'p{k}_surprise'] = df[f'p{k}_gap'].abs()
+
+    df['gap_mean2'] = df[['p1_gap', 'p2_gap']].mean(axis=1)
+    return df.drop(columns=['_pop', '_fin'])
+
+
 def add_added_value(df: pd.DataFrame) -> pd.DataFrame:
     """騎手・調教師の押し上げ力。
 
@@ -295,6 +341,8 @@ def build_features(races_df: pd.DataFrame, results_df: pd.DataFrame,
     df = add_horse_features(df, config)
     if config.speed_features:
         df = add_speed_features(df)
+    if config.recency_features:
+        df = add_recency_features(df)
     df = add_added_value(df)
     df = add_course_features(df, config)
     if config.market_features:

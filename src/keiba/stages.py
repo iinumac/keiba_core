@@ -79,6 +79,18 @@ MARKET_FREE_FEATURES = [
 織り込んでいる。詳細は docs/MARKET.md。
 """
 
+RECENCY_FEATURES = [
+    'p1_pop', 'p1_fin', 'p1_gap', 'p1_surprise',
+    'p2_pop', 'p2_fin', 'p2_gap', 'p2_surprise', 'gap_mean2',
+]
+"""前走・前々走の人気と着順のズレ。市場の過剰反応を捉える。
+
+前走の人気を使うので市場情報を部分的に含む。MARKET_FREE には入れない。
+足すと市場フリーモデルは 0.7527 → 0.7584。
+市場込みモデルの AUC は動かないが（+0.0002）、回収率には効く
+（過大評価グループを除くと全体 74.5% → 75.8%、人気薄に限れば +2.2pt）。
+"""
+
 STRATEGY_FEATURES = [
     'popularity', 'odds', 'market_implied_win_prob', 'odds_ratio_to_fav',
     'pop_odds_mismatch', 'horse_prev_win_rate', 'horse_prev_top3_rate',

@@ -130,6 +130,26 @@ def cross_roi(df: pd.DataFrame, by: str, payout_col: str = 'fuku',
     return pd.DataFrame(rows)
 
 
+def overvalued_after_last_race(df: pd.DataFrame) -> pd.Series:
+    """市場が前走に過剰反応して買われすぎている馬を判定する。
+
+    同じ人気帯の平均回収率と比べて有意に劣るグループ。実データでは
+    この集団の複勝回収率は 54.8%（全体 74.5%）。
+
+      前走13番人気以下 × 14着以下   超過 -10.9pt
+      前走13番人気以下 × 2-3着      超過  -6.6pt （人気薄で激走した反動）
+      前走1番人気 × 9-13着          超過  -5.9pt （1番人気で大敗した反動）
+
+    除外すると全体の回収率は 74.5% → 75.8%。
+    効果は人気薄に集中する（9番人気以下で 67.0% → 69.2%）。
+    """
+    p1_pop = pd.to_numeric(df.get('p1_pop'), errors='coerce')
+    p1_fin = pd.to_numeric(df.get('p1_fin'), errors='coerce')
+    return (((p1_pop >= 13) & (p1_fin >= 14))
+            | ((p1_pop >= 13) & p1_fin.between(2, 3))
+            | ((p1_pop == 1) & p1_fin.between(9, 13))).fillna(False)
+
+
 def attach_place_payout(df: pd.DataFrame, payouts: pd.DataFrame) -> pd.DataFrame:
     """各馬に複勝の払戻を付ける（3着内でなければ0）。"""
     f = payouts[payouts['bet_type'] == '複勝'].copy()

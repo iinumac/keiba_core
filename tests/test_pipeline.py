@@ -361,6 +361,45 @@ def test_speed_features():
           'horse_expected_top3_rate' not in stages.MARKET_FREE_FEATURES)
 
 
+def test_recency_features():
+    """前走・前々走の人気と着順のズレ。"""
+    print('\n[市場の過剰反応]')
+    import pandas as pd
+    from keiba.features import add_recency_features
+    from keiba import segments as sg, stages
+
+    d = pd.DataFrame({
+        'race_id': ['R1', 'R2', 'R3'],
+        'horse_id': ['H'] * 3,
+        'race_date': pd.to_datetime(['2024-01-01', '2024-02-01', '2024-03-01']),
+        'popularity': [1, 13, 5],
+        'finish_position': [12, 2, 4],
+    })
+    out = add_recency_features(d).sort_values('race_date')
+
+    check('初出走は前走が欠損', bool(pd.isna(out['p1_gap'].iloc[0])))
+    # R2 から見た前走は R1（1番人気で12着）→ gap = 12 - 1 = 11
+    check('人気より着順が悪いと gap は正', out['p1_gap'].iloc[1] == 11,
+          f"{out['p1_gap'].iloc[1]}")
+    # R3 から見た前走は R2（13番人気で2着）→ gap = 2 - 13 = -11
+    check('人気より着順が良いと gap は負', out['p1_gap'].iloc[2] == -11,
+          f"{out['p1_gap'].iloc[2]}")
+    check('surprise は絶対値', out['p1_surprise'].iloc[2] == 11)
+    check('前々走も取れる', out['p2_gap'].iloc[2] == 11, f"{out['p2_gap'].iloc[2]}")
+
+    # 過大評価グループの判定
+    cand = pd.DataFrame({
+        'p1_pop': [1, 1, 13, 13, 5, 5],
+        'p1_fin': [10, 3, 15, 2, 10, 2],
+    })
+    want = [True, False, True, True, False, False]
+    got = list(sg.overvalued_after_last_race(cand))
+    check('1番人気で大敗 / 人気薄で激走・大敗 を検出', got == want, str(got))
+
+    check('recency は市場フリーに入れない',
+          not (set(stages.RECENCY_FEATURES) & set(stages.MARKET_FREE_FEATURES)))
+
+
 def test_market():
     """市場の見立てを3着内確率に揃える計算。"""
     print('\n[市場確率]')
@@ -527,7 +566,7 @@ def main():
                test_course_notation, test_features,
                test_discovery_filters_to_jra, test_payouts,
                test_payout_matches_odds, test_backtest,
-               test_speed_features, test_market,
+               test_speed_features, test_recency_features, test_market,
                test_segments, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:

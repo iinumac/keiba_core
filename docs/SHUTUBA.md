@@ -71,7 +71,23 @@ cards = shutuba.fetch_weekend(f, days_ahead=10)
 ### オッズは前日だとまだ出ていない
 
 未発表の間は `---.-`。`card['odds_available']` で判定できる。
-確定オッズが要るなら発走が近づいてから取る。
+
+**オッズは発走直前まで動く。直前に取るほど市場の評価を正しく反映する。**
+いつ時点のものかが分かるよう、API が返す更新時刻も持たせてある。
+
+```python
+card['odds_updated_at']   # '2026-10-02 23:42:16'
+card['odds_status']       # '発売前' / '前日・暫定' / '確定'
+```
+
+直前に何度も回すなら [`05_predict`](../notebooks/05_predict.ipynb) を使う。
+生HTMLを取得せず（62MB）、ウェアハウスも学習済みモデルも使わないので起動が速い。
+`within_minutes` で発走が近いレースだけに絞れる。
+
+```python
+stages.predict(within_minutes=90)   # 発走まで90分以内のレースだけ
+stages.predict(race_ids=[...])      # レースを指定して取り直し
+```
 
 ## 出力
 

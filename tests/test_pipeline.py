@@ -595,6 +595,18 @@ def test_shutuba():
     check('race_id の抽出', shutuba.RACE_ID_RE.findall(
         'a href="/race/shutuba.html?race_id=202605040111"') == ['202605040111'])
 
+    # 発走までの時間。直前運用で対象レースを絞るのに使う
+    import datetime as _dt
+    now = _dt.datetime(2026, 10, 3, 10, 0)
+    for t, want in [('10:00', 0), ('09:59', -1), ('11:30', 90), ('11:31', 91)]:
+        got = shutuba.minutes_to_post(
+            {'date': '2026-10-03', 'start_time': t}, now=now)
+        check(f'発走{t} → {want}分', got == want, f'{got}')
+    check('発走時刻が無ければ None',
+          shutuba.minutes_to_post({'date': '2026-10-03'}) is None)
+
+    check('オッズの状態を日本語に', shutuba.ODDS_STATUS.get('final') == '確定')
+
     check('斤量をfloatに', shutuba._try_float('57.0 kg') == 57.0)
     check('Rをintに', shutuba._try_int('11R') == 11)
     check('数字が無ければ None', shutuba._try_int('') is None)

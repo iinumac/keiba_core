@@ -40,6 +40,7 @@ def run(start_stage: StageRef = 1, end_stage: StageRef = 5,
         collect_end: Optional[dt.date] = None,
         dry_run: bool = False,
         lookback_days: Optional[int] = None,
+        within_minutes: Optional[int] = None,
         workers: Optional[int] = None) -> Dict[str, Dict]:
     """指定した範囲のステージを順に実行する。
 
@@ -50,6 +51,7 @@ def run(start_stage: StageRef = 1, end_stage: StageRef = 5,
         dry_run: 取り込みで検知だけ行い、ダウンロードしない
         lookback_days: 取り込みの開始日を自動決定するとき、手持ちの最新日から
             さかのぼる日数。netkeiba の反映遅れで取りこぼすのを防ぐ。
+        within_minutes: 予想で、発走までこの分数以内のレースだけを対象にする。
         workers: パースの並列数
 
     Returns:
@@ -81,7 +83,7 @@ def run(start_stage: StageRef = 1, end_stage: StageRef = 5,
         elif name == 'strategy':
             r = stages.strategy(push=push)
         else:
-            r = stages.predict(push=push)
+            r = stages.predict(push=push, within_minutes=within_minutes)
         r['elapsed_sec'] = round(time.time() - t, 1)
         results[name] = r
 

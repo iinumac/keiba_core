@@ -45,7 +45,7 @@ df = pd.read_parquet('data/warehouse/results/year=2025/part.parquet')
 | [`02_build`](notebooks/02_build.ipynb) | 2. パース — 増えた分だけウェアハウスへ | `data/warehouse/` |
 | [`03_train`](notebooks/03_train.ipynb) | 3. 学習 — 3着内確率モデルとマスタ | `models/`, `data/master/` |
 | [`04_strategy`](notebooks/04_strategy.ipynb) | 4. 戦略評価 — 買い方の検証 | 画面出力 |
-| （5. 予想） | 今週末の出馬表を取得して買い目を出す（00_run のステージ5） | `data/shutuba/` |
+| [`05_predict`](notebooks/05_predict.ipynb) | 5. 予想 — **発走直前に何度でも回す用**。軽量・単独で動く | `data/shutuba/` |
 | [`90_analysis`](notebooks/90_analysis.ipynb) | 分析 — SQL による自由分析（独立） | — |
 
 01〜04 が一本のパイプライン、90 はそれを横から覗く道具。
@@ -60,6 +60,7 @@ pipeline.run(1, 5)          # 取り込み → パース → 学習 → 戦略�
 pipeline.run(2, 3)          # パースと学習だけ
 pipeline.run('train', 5)    # 名前でも指定できる
 pipeline.run(5, 5)          # 今週末の買い目だけ
+pipeline.run(5, 5, within_minutes=90)   # 発走90分以内のレースだけ
 ```
 
 途中の段が失敗したらそこで止まる。前の段の出力が次の段の入力になるため、

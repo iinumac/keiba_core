@@ -75,30 +75,41 @@ def upcoming_race_days(fetcher: Fetcher, days_ahead: int = 10,
     return [d for d in discovery.race_days(start, end, fetcher) if d >= start]
 
 
-def fetch_odds(race_id: str, fetcher: Fetcher) -> Dict[int, Dict[str, float]]:
-    """単勝オッズと人気。馬番 -> {'odds': x, 'popularity': n}。
+ODDS_STATUS = {'before': '発売前', 'middle': '前日・暫定', 'final': '確定'}
 
-    未発表なら空の辞書。前日だとまだ出ていないことがある。
+
+def fetch_odds(race_id: str, fetcher: Fetcher) -> Dict:
+    """単勝オッズと人気、そして**いつ時点のオッズか**。
+
+    オッズは発走直前まで動く。直前に取るほど市場の評価を正しく反映するので、
+    いつ更新されたものかが分かるようにしておく。
+
+    Returns:
+        {'odds': {馬番: {'odds': x, 'popularity': n}},
+         'updated_at': '2026-10-02 23:42:16', 'status': 'middle'}
+        未発表なら odds は空。
     """
     resp = fetcher.get(
         f'{RACE_HOST}/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init',
         referer=f'{RACE_HOST}/odds/index.html?race_id={race_id}')
+    empty = {'odds': {}, 'updated_at': None, 'status': None}
     if resp is None or resp.status_code != 200:
-        return {}
+        return empty
     try:
-        data = json.loads(resp.text).get('data', {}).get('odds', {}).get('1', {})
+        payload = json.loads(resp.text)
+        data = payload.get('data', {})
+        table = data.get('odds', {}).get('1', {})
     except (ValueError, AttributeError):
-        return {}
+        return empty
 
     out: Dict[int, Dict[str, float]] = {}
-    for umaban, values in data.items():
+    for umaban, values in table.items():
         try:
-            odds = float(values[0])
-            pop = int(values[2])
+            out[int(umaban)] = {'odds': float(values[0]), 'popularity': int(values[2])}
         except (TypeError, ValueError, IndexError):
             continue
-        out[int(umaban)] = {'odds': odds, 'popularity': pop}
-    return out
+    return {'odds': out, 'updated_at': data.get('official_datetime'),
+            'status': payload.get('status')}
 
 
 def _text(node, default: str = '') -> str:
@@ -167,12 +178,15 @@ def fetch_race_card(race_id: str, fetcher: Fetcher,
     }
 
     if with_odds:
-        odds = fetch_odds(race_id, fetcher)
+        info_odds = fetch_odds(race_id, fetcher)
+        table = info_odds['odds']
         for h in horses:
-            o = odds.get(h['horse_number'], {})
+            o = table.get(h['horse_number'], {})
             h['odds'] = o.get('odds')
             h['popularity'] = o.get('popularity')
-        card['odds_available'] = bool(odds)
+        card['odds_available'] = bool(table)
+        card['odds_updated_at'] = info_odds['updated_at']
+        card['odds_status'] = ODDS_STATUS.get(info_odds['status'], info_odds['status'])
     return card
 
 
@@ -214,8 +228,20 @@ def _try_int(s: str) -> Optional[int]:
     return int(m.group()) if m else None
 
 
+def minutes_to_post(card: Dict, now: Optional[dt.datetime] = None) -> Optional[int]:
+    """発走まであと何分か。過ぎていれば負の値。"""
+    if not card.get('start_time') or not card.get('date'):
+        return None
+    try:
+        post = dt.datetime.fromisoformat(f"{card['date']}T{card['start_time']}:00")
+    except ValueError:
+        return None
+    return int((post - (now or dt.datetime.now())).total_seconds() // 60)
+
+
 def fetch_weekend(fetcher: Optional[Fetcher] = None, days_ahead: int = 10,
-                  with_odds: bool = True, on_race=None) -> List[Dict]:
+                  with_odds: bool = True, on_race=None,
+                  race_ids: Optional[List[str]] = None) -> List[Dict]:
     """これから開催される全レースの出馬表をまとめて取る。
 
     リクエスト数は「月1 + 開催日数 + レース数×2（出馬表とオッズ）」。
@@ -223,6 +249,17 @@ def fetch_weekend(fetcher: Optional[Fetcher] = None, days_ahead: int = 10,
     """
     fetcher = fetcher or Fetcher()
     cards: List[Dict] = []
+
+    if race_ids is not None:
+        # race_id を指定しての取り直し。オッズだけ更新したいときに使う
+        for rid in race_ids:
+            card = fetch_race_card(rid, fetcher, with_odds=with_odds)
+            if card:
+                cards.append(card)
+            if on_race is not None:
+                on_race(None, rid, card)
+        return cards
+
     for day in upcoming_race_days(fetcher, days_ahead):
         ids = race_ids_on(day, fetcher)
         for rid in ids:

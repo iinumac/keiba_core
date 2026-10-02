@@ -495,14 +495,23 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
 # 5. 予想（今週末）
 # ---------------------------------------------------------------------------
 def predict(push: bool = False, days_ahead: int = 10,
-            save_json: bool = True, strategy_result: Optional[Dict] = None) -> Dict:
+            save_json: bool = True, within_minutes: Optional[int] = None,
+            race_ids: Optional[List[str]] = None) -> Dict:
     """今週末の出馬表を取ってきて、買い目を出す。
 
     JRA公式（jra.go.jp）は POST にトークンを渡す方式でURLを直接叩けないため、
     netkeiba から race_id で取得する。詳細は docs/SHUTUBA.md。
 
-    `strategy_result` を渡さない場合は学習済みモデルを models/ から読む。
-    オッズが未発表（前日など）のレースは買い目を出せない。
+    **オッズは発走直前まで動く。** 直前に取るほど市場の評価を正しく反映するので、
+    発走が近いレースだけを対象にして何度も回せるようにしてある。
+
+    Args:
+        within_minutes: 発走までこの分数以内のレースだけを対象にする。
+            None なら期間内すべて。直前運用では 60〜90 あたり。
+        race_ids: レースを直接指定する。オッズだけ取り直したいときに使う。
+        days_ahead: 何日先まで見るか。
+
+    この段はウェアハウスも学習済みモデルも使わないので、単独で何度でも回せる。
     """
     import pickle
     from . import betting, config, fetch, shutuba
@@ -510,20 +519,47 @@ def predict(push: bool = False, days_ahead: int = 10,
     _rule(STAGE_LABELS['predict'])
 
     fetcher = fetch.Fetcher()
-    days = shutuba.upcoming_race_days(fetcher, days_ahead=days_ahead)
-    if not days:
-        print(f'  今後 {days_ahead} 日に開催はありません')
-        return {'stage': 'predict', 'ok': True, 'races': 0, 'plans': []}
-    print(f'  開催日: ' + ', '.join(f'{d:%m/%d}' for d in days))
+
+    if race_ids is None:
+        days = shutuba.upcoming_race_days(fetcher, days_ahead=days_ahead)
+        if not days:
+            print(f'  今後 {days_ahead} 日に開催はありません')
+            return {'stage': 'predict', 'ok': True, 'races': 0, 'plans': []}
+        print('  開催日: ' + ', '.join(f'{d:%m/%d}' for d in days))
+
+        if within_minutes is not None:
+            # 発走時刻を知るには出馬表が要るので、まずオッズ無しで軽く取る
+            print(f'  発走まで {within_minutes} 分以内のレースに絞ります')
+            race_ids = []
+            for day in days:
+                for rid in shutuba.race_ids_on(day, fetcher):
+                    card = shutuba.fetch_race_card(rid, fetcher, with_odds=False)
+                    if not card:
+                        continue
+                    card['date'] = day.isoformat()
+                    left = shutuba.minutes_to_post(card)
+                    if left is not None and 0 <= left <= within_minutes:
+                        race_ids.append(rid)
+            print(f'  対象 {len(race_ids)} レース')
+            if not race_ids:
+                print('  該当なし。発走がもっと近づいてから実行してください')
+                return {'stage': 'predict', 'ok': True, 'races': 0, 'plans': []}
 
     def on_race(day, race_id, card):
         if card:
             mark = '○' if card.get('odds_available') else '×'
-            print(f'    {day} {card["venue_name"]} {card["race_num"]:>2}R '
-                  f'{(card["race_name"] or "")[:16]:18s} オッズ{mark}', flush=True)
+            left = shutuba.minutes_to_post(card)
+            when = f'発走まで{left:>4}分' if left is not None else ''
+            print(f'    {card["venue_name"]} {card["race_num"]:>2}R '
+                  f'{(card["race_name"] or "")[:16]:18s} オッズ{mark} {when}', flush=True)
 
-    cards = shutuba.fetch_weekend(fetcher, days_ahead=days_ahead, on_race=on_race)
+    cards = shutuba.fetch_weekend(fetcher, days_ahead=days_ahead,
+                                  on_race=on_race, race_ids=race_ids)
     print(f'  取得 {len(cards)} レース')
+    stamps = {c.get('odds_updated_at') for c in cards if c.get('odds_updated_at')}
+    if stamps:
+        print(f'  オッズ時点: {sorted(stamps)[-1]}'
+              f'（{cards[0].get("odds_status") or "不明"}）')
 
     if save_json and cards:
         out = config.DATA_DIR / 'shutuba'
@@ -554,13 +590,17 @@ def predict(push: bool = False, days_ahead: int = 10,
                                  [h['horse_number'] for h in hs], list(top3))
         plans.append((card, plan))
 
+    plans.sort(key=lambda cp: shutuba.minutes_to_post(cp[0]) or 99999)
+
     bought = [(c, p) for c, p in plans if p.shape]
     print(f'\n  買い目を出せたレース: {len(bought)} / {len(plans)}')
     for card, plan in bought:
         combos = sorted(tuple(sorted(c)) for c in plan.combos)
-        print(f'    {card["venue_name"]} {card["race_num"]:>2}R '
+        left = shutuba.minutes_to_post(card)
+        print(f'    [{card["start_time"]}] {card["venue_name"]} {card["race_num"]:>2}R '
               f'{(card["race_name"] or "")[:14]:16s} 確信度{plan.confidence:.2f} '
-              f'{plan.shape}（{plan.points}点）')
+              f'{plan.shape}（{plan.points}点）'
+              + (f'  発走まで{left}分' if left is not None else ''))
         print(f'      {combos}')
 
     skipped = pd.Series([p.reason for _, p in plans if not p.shape]).value_counts()

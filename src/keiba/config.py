@@ -12,7 +12,7 @@ MANIFEST_PATH = WAREHOUSE_DIR / 'manifest.parquet'
 DUCKDB_PATH = DATA_DIR / 'keiba.duckdb'
 MODEL_DIR = PROJECT_ROOT / 'models'
 
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 """パーサの出力仕様のバージョン。
 
 parse.py の出力（列の追加・削除・値の意味の変更）を変えたら必ず上げること。
@@ -27,6 +27,8 @@ parse.py の出力（列の追加・削除・値の意味の変更）を変え�
   3: 「芝右 内2周3600m」（中山のステイヤーズS）にも対応。距離の前に
      「2周」が入る表記で、16年分すべてが取りこぼされていた。
      全HTMLを走査してコース表記は14種と確認済み。
+  4: 払戻（pay_table_01）の抽出を追加。「レース×券種×組み合わせ」の
+     縦持ちで、同着は行が増えるだけになる。
 """
 
 GITHUB_OWNER = 'iinumac'

@@ -27,7 +27,8 @@ from . import config
 
 RACES = 'races'
 RESULTS = 'results'
-TABLES = (RACES, RESULTS)
+PAYOUTS = 'payouts'
+TABLES = (RACES, RESULTS, PAYOUTS)
 
 
 def table_dir(table: str, warehouse: Optional[Path] = None) -> Path:
@@ -111,6 +112,7 @@ def _resolve_year(df: pd.DataFrame) -> pd.Series:
 
 
 def upsert(races: pd.DataFrame, results: pd.DataFrame,
+           payouts: Optional[pd.DataFrame] = None,
            warehouse: Optional[Path] = None) -> dict:
     """新しいレコードを取り込む。同じ race_id は新しい方で置き換える。
 
@@ -120,7 +122,7 @@ def upsert(races: pd.DataFrame, results: pd.DataFrame,
     stats = {}
 
     if races.empty:
-        return {'races': 0, 'results': 0, 'partitions': []}
+        return {'races': 0, 'results': 0, 'payouts': 0, 'partitions': []}
 
     races = races.copy()
     races['_year'] = _resolve_year(races)
@@ -130,9 +132,18 @@ def upsert(races: pd.DataFrame, results: pd.DataFrame,
     results['_year'] = results['race_id'].astype(str).map(year_of)
     results['_year'] = results['_year'].fillna(_resolve_year(results))
 
+    if payouts is None:
+        payouts = pd.DataFrame(columns=['race_id'])
+    payouts = payouts.copy()
+    if not payouts.empty:
+        payouts['_year'] = payouts['race_id'].astype(str).map(year_of)
+
     touched = sorted({int(y) for y in races['_year'].dropna().unique()})
 
-    for table, df in ((RACES, races), (RESULTS, results)):
+    for table, df in ((RACES, races), (RESULTS, results), (PAYOUTS, payouts)):
+        if df.empty:
+            stats[table] = 0
+            continue
         n = 0
         for year in touched:
             incoming = df[df['_year'] == year].drop(columns=['_year'])
@@ -146,7 +157,10 @@ def upsert(races: pd.DataFrame, results: pd.DataFrame,
                 merged = pd.concat([old, incoming], ignore_index=True)
             else:
                 merged = incoming
-            sort_cols = ['race_id'] + (['horse_number'] if 'horse_number' in merged.columns else [])
+            sort_cols = ['race_id']
+            for c in ('horse_number', 'bet_type', 'seq'):
+                if c in merged.columns:
+                    sort_cols.append(c)
             merged.sort_values(sort_cols).to_parquet(path, index=False)
             n += len(incoming)
         stats[table] = n
@@ -188,6 +202,14 @@ def build_duckdb(db_path: Optional[Path] = None,
             CREATE OR REPLACE VIEW race_results AS
             SELECT r.*, c.* EXCLUDE (race_id)
             FROM results r
+            LEFT JOIN races c USING (race_id);
+        """)
+        # 払戻は「レース×券種×組み合わせ」の縦持ち。同着で行が増える。
+        con.execute("""
+            CREATE OR REPLACE VIEW race_payouts AS
+            SELECT p.*, c.date, c.venue_name, c.race_name, c.surface,
+                   c.distance, c.horse_count
+            FROM payouts p
             LEFT JOIN races c USING (race_id);
         """)
     finally:

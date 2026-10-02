@@ -32,6 +32,79 @@ None になっていた。テストから参照するため、ここに定数と
 """
 
 
+PAY_TABLE_RE = re.compile(
+    r'<table[^>]*class="[^"]*pay_table_01[^"]*"[^>]*>(.*?)</table>', re.S)
+PAY_TR_RE = re.compile(r'<tr[^>]*>(.*?)</tr>', re.S)
+PAY_CELL_RE = re.compile(r'<(th|td)[^>]*>(.*?)</\1>', re.S)
+BR_RE = re.compile(r'<br\s*/?>', re.I)
+STRIP_TAG_RE = re.compile(r'<[^>]+>')
+
+BET_TYPES = ('単勝', '複勝', '枠連', '馬連', 'ワイド', '馬単', '三連複', '三連単')
+"""払戻表に現れる券種。出走頭数によって発売されないものがある。
+
+  8頭以下 → 枠連なし（実データで2,242レース）
+  4頭以下 → 複勝なし（実データで1レース）
+"""
+
+
+def _pay_cells(raw: str) -> List[str]:
+    """<br> 区切りのセルを値のリストにする。
+
+    同着や複勝の着順ぶんだけ値が並ぶ。全レースを走査した結果、
+    組み合わせ・払戻・人気の個数は必ず一致していた（不一致0件）。
+    """
+    out = []
+    for part in BR_RE.split(raw):
+        v = STRIP_TAG_RE.sub('', part).replace('\xa0', ' ').strip()
+        if v:
+            out.append(v)
+    return out
+
+
+def _to_int(text: str) -> Optional[int]:
+    t = re.sub(r'[,円\s]', '', text)
+    return int(t) if t.isdigit() else None
+
+
+def parse_payouts(html: str, race_id: str) -> List[Dict]:
+    """払戻表を「レース×券種×組み合わせ」の行に展開する。
+
+    横持ち（券種ごとに列を作る）にすると同着で破綻する。実データには
+    3着が3頭同着でワイドが7組、三連複が3組になったレースが2件あった。
+    縦持ちなら行が増えるだけで済む。
+
+    Returns:
+        [{race_id, bet_type, seq, combination, horse_numbers, payout, popularity}, ...]
+    """
+    rows: List[Dict] = []
+    for block in PAY_TABLE_RE.findall(html):
+        for tr in PAY_TR_RE.findall(block):
+            cells = PAY_CELL_RE.findall(tr)
+            if len(cells) < 4:
+                continue
+            bet = STRIP_TAG_RE.sub('', cells[0][1]).strip()
+            if bet not in BET_TYPES:
+                continue
+            combos = _pay_cells(cells[1][1])
+            pays = _pay_cells(cells[2][1])
+            pops = _pay_cells(cells[3][1])
+            if not (len(combos) == len(pays) == len(pops)):
+                # 走査では0件だったが、崩れた行は取り込まない
+                continue
+            for i, (combo, pay, pop) in enumerate(zip(combos, pays, pops)):
+                nums = [int(x) for x in re.findall(r'\d+', combo)]
+                rows.append({
+                    'race_id': race_id,
+                    'bet_type': bet,
+                    'seq': i,
+                    'combination': '-'.join(str(n) for n in nums),
+                    'horse_numbers': nums,
+                    'payout': _to_int(pay),
+                    'popularity': _to_int(pop),
+                })
+    return rows
+
+
 def classify_race_level(prize_money: float) -> Tuple[str, int]:
     """
     1着賞金からレースレベルを分類
@@ -137,12 +210,13 @@ def parse_race_html_full(html_path: Path) -> Dict:
     Returns:
         dict: {
             'race_info': レース情報,
-            'horses': 出走馬リスト
+            'horses': 出走馬リスト,
+            'payouts': 払戻リスト（レース×券種×組み合わせ）
         }
     """
-    with open(html_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f.read(), 'html.parser')
-    
+    raw_html = Path(html_path).read_text(encoding='utf-8', errors='ignore')
+    soup = BeautifulSoup(raw_html, 'html.parser')
+
     race_id = Path(html_path).stem
     
     # ============ レース情報 ============
@@ -382,4 +456,5 @@ def parse_race_html_full(html_path: Path) -> Dict:
         # 出走頭数
         race_info['horse_count'] = len(horses)
     
-    return {'race_info': race_info, 'horses': horses}
+    payouts = parse_payouts(raw_html, race_id)
+    return {'race_info': race_info, 'horses': horses, 'payouts': payouts}

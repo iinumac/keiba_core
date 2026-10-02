@@ -189,6 +189,77 @@ def test_discovery_filters_to_jra():
     check('ウェアハウスに中央以外が無い', len(non_jra) == 0, f'{len(non_jra)} 件')
 
 
+def test_payouts():
+    """払戻は「レース×券種×組み合わせ」の縦持ち。
+
+    同着で組数が増えるため、横持ち（券種ごとに列）では破綻する。
+    実データには3着が3頭同着でワイドが7組になったレースが2件ある。
+    """
+    print('\n[払戻]')
+    pay = store.read_table('payouts')
+    check('払戻が入っている', len(pay) > 600000, f'{len(pay):,} 行')
+    check('払戻金額に欠損が無い', pay['payout'].isna().sum() == 0)
+    check('人気に欠損が無い', pay['popularity'].isna().sum() == 0)
+    check('払戻は100円以上', pay['payout'].min() >= 100, f"最小 {pay['payout'].min()}")
+
+    types = set(pay['bet_type'])
+    check('券種が8種そろっている',
+          types == {'単勝', '複勝', '枠連', '馬連', 'ワイド', '馬単', '三連複', '三連単'},
+          str(sorted(types)))
+
+    # 3着3頭同着のレース。ワイド7組・複勝5組・三連複3組になる
+    for rid in ('201208040611', '202009050712'):
+        g = pay[pay['race_id'] == rid]
+        shape = g['bet_type'].value_counts().to_dict()
+        ok = (shape.get('ワイド') == 7 and shape.get('複勝') == 5
+              and shape.get('三連複') == 3)
+        check(f'3着3頭同着 {rid} を展開できている', ok, str(shape))
+
+    # 8頭以下は枠連が発売されない
+    races = store.read_table('races', columns=['race_id', 'horse_count'])
+    n_run = (store.read_table('results', columns=['race_id', 'horse_number'])
+             .groupby('race_id').size())
+    waku = set(pay[pay['bet_type'] == '枠連']['race_id'])
+    small = {r for r, n in n_run.items() if n <= 8}
+    check('8頭以下のレースに枠連が無い', not (small & waku),
+          f'{len(small & waku)} 件 / 8頭以下 {len(small):,} レース')
+
+
+def test_payout_matches_odds():
+    """払戻と results.odds は別々に抽出した独立データ。突き合わせて検証する。"""
+    print('\n[払戻と結果の整合]')
+    try:
+        con = store.connect()
+    except ImportError:
+        print('  - duckdb 未インストールのためスキップ')
+        return
+
+    row = con.sql("""
+      WITH win AS (SELECT race_id, horse_number, odds FROM results
+                   WHERE finish_position = 1),
+           pay AS (SELECT race_id, horse_numbers[1] AS horse_number, payout,
+                          count(*) OVER (PARTITION BY race_id) AS n_win
+                   FROM payouts WHERE bet_type = '単勝')
+      SELECT
+        sum(CASE WHEN p.n_win = 1 AND abs(w.odds*100 - p.payout) >= 1
+                 THEN 1 ELSE 0 END) AS solo_mismatch,
+        sum(CASE WHEN p.n_win = 1 THEN 1 ELSE 0 END) AS solo
+      FROM win w JOIN pay p
+        ON w.race_id = p.race_id AND w.horse_number = p.horse_number
+    """).fetchone()
+    check('単独1着なら 単勝払戻 == オッズ×100', row[0] == 0,
+          f'{row[0]} 件 / {row[1]:,} 件')
+
+    bad = con.sql("""
+      WITH ex AS (SELECT race_id, unnest(horse_numbers) AS hn
+                  FROM payouts WHERE bet_type <> '枠連')
+      SELECT count(*) FROM ex
+      LEFT JOIN results r ON ex.race_id = r.race_id AND ex.hn = r.horse_number
+      WHERE r.horse_number IS NULL
+    """).fetchone()[0]
+    check('払戻の馬番がすべて結果に実在する', bad == 0, f'{bad} 件')
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -281,7 +352,8 @@ def main():
     for fn in [test_manifest_roundtrip, test_parser_version_triggers_reparse,
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
-               test_discovery_filters_to_jra, test_audit,
+               test_discovery_filters_to_jra, test_payouts,
+               test_payout_matches_odds, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

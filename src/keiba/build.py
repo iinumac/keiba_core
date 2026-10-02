@@ -92,10 +92,11 @@ def validate(parsed: dict) -> Optional[str]:
 
 
 def _flush(tasks_done: List[dict], races: List[dict], horses: List[dict],
-           warehouse: Optional[Path]) -> dict:
+           payouts: List[dict], warehouse: Optional[Path]) -> dict:
     if not races:
-        return {'races': 0, 'results': 0, 'partitions': []}
-    return store.upsert(pd.DataFrame(races), pd.DataFrame(horses), warehouse)
+        return {'races': 0, 'results': 0, 'payouts': 0, 'partitions': []}
+    return store.upsert(pd.DataFrame(races), pd.DataFrame(horses),
+                        pd.DataFrame(payouts), warehouse)
 
 
 def build(years: Optional[Iterable[int]] = None,
@@ -130,16 +131,18 @@ def build(years: Optional[Iterable[int]] = None,
         reasons[t.reason] = reasons.get(t.reason, 0) + 1
 
     if not tasks:
-        return {'parsed': 0, 'races': 0, 'results': 0, 'reasons': reasons,
-                'partitions': [], 'failed': 0, 'invalid': 0, 'invalid_samples': []}
+        return {'parsed': 0, 'races': 0, 'results': 0, 'payouts': 0,
+                'reasons': reasons, 'partitions': [], 'failed': 0,
+                'invalid': 0, 'invalid_samples': []}
 
     now = _dt.datetime.now().isoformat(timespec='seconds')
     total = len(tasks)
     races: List[dict] = []
     horses: List[dict] = []
+    payouts: List[dict] = []
     man_rows: List[dict] = []
     touched = set()
-    n_races = n_results = failed = 0
+    n_races = n_results = n_payouts = failed = 0
     invalid: List[tuple] = []
 
     by_path = {str(t.path): t for t in tasks}
@@ -167,6 +170,7 @@ def build(years: Optional[Iterable[int]] = None,
 
         races.append(parsed['race_info'])
         horses.extend(parsed['horses'])
+        payouts.extend(parsed.get('payouts') or [])
         man_rows.append({
             'race_id': task.race_id,
             'year_dir': task.year_dir,
@@ -182,9 +186,10 @@ def build(years: Optional[Iterable[int]] = None,
         for i, (path_str, parsed, err) in enumerate(results_iter, 1):
             absorb(path_str, parsed, err, i)
             if len(races) >= batch_size:
-                s = _flush(man_rows, races, horses, warehouse)
-                n_races += s['races']; n_results += s['results']; touched |= set(s['partitions'])
-                races, horses = [], []
+                s = _flush(man_rows, races, horses, payouts, warehouse)
+                n_races += s['races']; n_results += s['results']
+                n_payouts += s['payouts']; touched |= set(s['partitions'])
+                races, horses, payouts = [], [], []
             if progress and i % 500 == 0:
                 progress(i, total, 'parse')
     else:
@@ -207,28 +212,30 @@ def build(years: Optional[Iterable[int]] = None,
             # 並列が使えない環境でも止まらないよう、逐次に落とす
             print(f'⚠️ 並列実行に失敗したため逐次実行に切り替えます: '
                   f'{type(e).__name__}: {str(e)[:120]}', flush=True)
-            races, horses, man_rows = [], [], []
-            n_races = n_results = failed = 0
+            races, horses, payouts, man_rows = [], [], [], []
+            n_races = n_results = n_payouts = failed = 0
             touched = set()
             for i, path_str in enumerate(paths, 1):
                 _, parsed, err = _parse_one(path_str)
                 absorb(path_str, parsed, err, i)
                 if len(races) >= batch_size:
-                    s = _flush(man_rows, races, horses, warehouse)
+                    s = _flush(man_rows, races, horses, payouts, warehouse)
                     n_races += s['races']; n_results += s['results']
-                    touched |= set(s['partitions'])
-                    races, horses = [], []
+                    n_payouts += s['payouts']; touched |= set(s['partitions'])
+                    races, horses, payouts = [], [], []
                 if progress and i % 500 == 0:
                     progress(i, total, 'parse')
 
     if races:
-        s = _flush(man_rows, races, horses, warehouse)
-        n_races += s['races']; n_results += s['results']; touched |= set(s['partitions'])
+        s = _flush(man_rows, races, horses, payouts, warehouse)
+        n_races += s['races']; n_results += s['results']
+        n_payouts += s['payouts']; touched |= set(s['partitions'])
 
     manifest.save(manifest.upsert(man, man_rows))
     if progress:
         progress(total, total, 'done')
 
     return {'parsed': len(man_rows), 'races': n_races, 'results': n_results,
-            'reasons': reasons, 'partitions': sorted(touched), 'failed': failed,
+            'payouts': n_payouts, 'reasons': reasons,
+            'partitions': sorted(touched), 'failed': failed,
             'invalid': len(invalid), 'invalid_samples': invalid[:10]}

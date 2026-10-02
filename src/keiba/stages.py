@@ -202,7 +202,8 @@ def build(push: bool = True, workers: Optional[int] = None) -> Dict:
     result = build_mod.build(workers=workers, hash_all=False, progress=prog)
 
     print(f"\nパース: {result['parsed']:,} 件  {result['reasons']}")
-    print(f"  races {result['races']:,} / results {result['results']:,}")
+    print(f"  races {result['races']:,} / results {result['results']:,}"
+          f" / payouts {result.get('payouts', 0):,}")
     print(f"  取り込まなかった（結果の無い空ページ）: {result['invalid']}")
     print(f"  失敗: {result['failed']}")
 

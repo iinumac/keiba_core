@@ -546,6 +546,27 @@ def test_betting():
           f"{r['収支']} (cost {plan.cost})")
 
 
+def test_strategy_stage_order():
+    """戦略の3段階が正しく構成されていること。"""
+    print('\n[戦略の段階]')
+    import inspect
+    from keiba import stages
+
+    src = inspect.getsource(stages.strategy)
+    for n, label in [(1, '候補のスコアリング'), (2, '市場と独立'), (3, '除外と買い方')]:
+        check(f'【{n}】{label} の段がある', f'【{n}】' in src)
+
+    # 市場なしの特徴量に市場情報が混ざっていないこと（段階2の前提）
+    banned = {'odds', 'popularity', 'market_implied_win_prob',
+              'odds_ratio_to_fav', 'pop_odds_mismatch', 'prev_odds',
+              'prev_popularity'}
+    check('市場なしモデルの特徴量が独立している',
+          not (banned & set(stages.MARKET_FREE_FEATURES)))
+    # 市場ありは市場情報を含むこと
+    check('市場ありモデルは市場情報を含む',
+          bool(banned & set(stages.STRATEGY_FEATURES)))
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -641,7 +662,8 @@ def main():
                test_discovery_filters_to_jra, test_payouts,
                test_payout_matches_odds, test_backtest,
                test_speed_features, test_recency_features, test_market,
-               test_segments, test_betting, test_audit,
+               test_segments, test_betting, test_strategy_stage_order,
+               test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

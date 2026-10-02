@@ -357,97 +357,134 @@ def train(push: bool = True) -> Dict:
 # ---------------------------------------------------------------------------
 # 4. 予想（戦略評価）
 # ---------------------------------------------------------------------------
-def strategy(push: bool = False, bet_types: Optional[List[str]] = None) -> Dict:
-    """買い目戦略を評価する。
+def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
+    """買い目戦略を3段階で評価する。
 
-    **的中率と回収率を両方出す。** 的中率は点数を増やせば必ず上がるので
-    単独では判断できず、回収率はごく稀な超高配当に支配されうる
-    （実データの三連単には5,800万円の払戻がある）。
+    各段階で測る指標が違う。混ぜると判断を誤る。
 
-    外れ値への依存度を見るため「最高配当1本を除いた回収率」も出す。
-    期待値がプラスでも的中率が低すぎると収束前に資金が尽きるので、
-    「回収率が100%超だと確認するのに必要なレース数」も併記する。
+      1. 候補のスコアリング（市場ありモデル）     … 的中率で測る
+      2. 市場と独立した見方との突き合わせ（市場なし）… 回収率で測る
+      3. 除外と買い方                             … 回収率と参加率で測る
 
-    買い目の選抜は**確率**で行う。「AI複勝率 × 単勝オッズ」を期待値として
-    使うのは誤りで（単勝オッズは1着の配当、3着内の配当ではない）、
-    それで選ぶとランダムより12倍悪くなることを確認済み。
+    ## なぜこの順番か
+
+    当初は「市場なしモデルで候補6頭に絞ってから市場ありで評価する」案を
+    検討したが、実測で劣った。市場なしモデル（AUC 0.7527）は市場
+    （0.8189）より弱く、絞り込みに使うと情報を捨てるだけになる。
+
+      上位6頭に3着内の3頭すべてを含む割合
+        市場ありモデル 49.7%  /  市場なしモデル 42.7%
+
+      端から端までの回収率（検証期間）
+        市場ありで直接          96.7%
+        市場なしで候補6頭→市場あり 88.2%
+
+    市場なしモデルの価値は「候補を絞ること」ではなく
+    **「市場と違う意見を出すこと」**にある。全馬をスコアリングしてから、
+    乖離の大きいところを見つけ、過大評価を除外する。
     """
     import numpy as np
     import lightgbm as lgb
     from sklearn.metrics import roc_auc_score
-    from . import backtest, store
+    from . import backtest, betting, segments as sg, store
     from .features import build_features, C04_CONFIG
 
     _rule(STAGE_LABELS['strategy'])
 
     races, results = store.load_for_features()
     df = build_features(races, results, C04_CONFIG)
-    feats = [c for c in STRATEGY_FEATURES if c in df.columns]
+    payouts = store.read_table('payouts')
+    payouts['race_id'] = payouts['race_id'].astype(str)
+    df['race_id'] = df['race_id'].astype(str)
 
-    d = df.copy()
-    for c in feats:
-        d[c] = d[c].replace([np.inf, -np.inf], np.nan).fillna(0)
-    tr = d[d['year'] <= TRAIN_END_YEAR]
-    te = d[d['year'] > TRAIN_END_YEAR].copy()
-    print(f'学習 {len(tr):,} 行 / 検証 {len(te):,} 行')
+    market = [c for c in STRATEGY_FEATURES if c in df.columns]
+    free = [c for c in MARKET_FREE_FEATURES if c in df.columns]
+    recency = [c for c in RECENCY_FEATURES if c in df.columns]
+    f_market = list(dict.fromkeys(market + free + recency))
+    f_free = list(dict.fromkeys(free))
+
+    for c in set(f_market + f_free):
+        df[c] = pd.to_numeric(df[c], errors='coerce').replace(
+            [np.inf, -np.inf], np.nan).fillna(0)
+    tr = df[df['year'] <= train_end_year]
+    te = df[df['year'] > train_end_year].copy()
 
     params = {'objective': 'binary', 'metric': 'auc', 'learning_rate': 0.05,
               'num_leaves': 63, 'verbose': -1, 'seed': 42}
-    model_top3 = lgb.train(params, lgb.Dataset(tr[feats], tr['is_top3']),
-                           num_boost_round=400)
-    model_win = lgb.train(params, lgb.Dataset(tr[feats], tr['is_win']),
-                          num_boost_round=400)
-    auc3 = roc_auc_score(te['is_top3'], model_top3.predict(te[feats]))
-    aucw = roc_auc_score(te['is_win'], model_win.predict(te[feats]))
-    print(f'  3着内モデル AUC {auc3:.4f} / 勝率モデル AUC {aucw:.4f}')
 
-    te['pred_top3'] = model_top3.predict(te[feats])
-    te['race_id'] = te['race_id'].astype(str)
-    payouts = store.read_table('payouts')
-    payouts['race_id'] = payouts['race_id'].astype(str)
-    payouts = payouts[payouts['race_id'].isin(set(te['race_id']))]
+    # ---------------- 1. 候補のスコアリング ----------------
+    print('【1】候補のスコアリング（市場ありモデル）— 的中率で測る')
+    m_market = lgb.train(params, lgb.Dataset(tr[f_market], tr['is_top3']),
+                         num_boost_round=600)
+    te['score'] = m_market.predict(te[f_market])
+    auc = roc_auc_score(te['is_top3'], te['score'])
+    print(f'  AUC {auc:.4f}   学習 {len(tr):,} / 検証 {len(te):,} 行')
 
-    plans = bet_types or [('ワイド', 3), ('ワイド', 5), ('三連複', 5),
-                          ('三連複', 7), ('三連単', 5), ('馬連', 3)]
-    rows = []
-    for bet, n in plans:
-        for col, lab, asc in [('pred_top3', 'AI', False),
-                              ('popularity', '人気', True)]:
-            r = backtest.run(te, payouts, label=f'{bet} {lab} {n}頭BOX',
-                             column=col, n_pick=n, bet_type=bet, ascending=asc)
-            row = r.as_row()
-            row['控除率後の基準%'] = TAKEOUT_BASELINE.get(bet)
-            if row['控除率後の基準%'] is not None:
-                row['上乗せpt'] = round(r.roi - row['控除率後の基準%'], 1)
-            rows.append(row)
+    cover = []
+    for n in (4, 5, 6, 7):
+        ok = tot = 0
+        for _, g in te.groupby('race_id'):
+            actual = set(g.loc[g['finish_position'] <= 3, 'horse_number'])
+            if len(actual) < 3 or len(g) < 8:
+                continue
+            tot += 1
+            ok += actual <= set(g.nlargest(n, 'score')['horse_number'])
+        cover.append({'上位N頭': n, '3頭すべてを含む割合%': round(100 * ok / tot, 1)})
+    print(pd.DataFrame(cover).to_string(index=False))
 
-    table = pd.DataFrame(rows)
-    print()
-    print(table.to_string(index=False))
-    print()
-    print('「控除率後の基準」はランダムに買ったときの収束先。'
-          'これを上回った分がモデルの実力で、100%に届いて初めて黒字になる。')
+    # ---------------- 2. 市場と独立した見方 ----------------
+    print('\n【2】市場と独立した見方との突き合わせ（市場なしモデル）— 回収率で測る')
+    m_free = lgb.train(params, lgb.Dataset(tr[f_free], tr['is_top3']),
+                       num_boost_round=600)
+    te['score_free'] = m_free.predict(te[f_free])
+    print(f'  AUC {roc_auc_score(te["is_top3"], te["score_free"]):.4f}'
+          f'（市場ありより低いのは当然。絞り込みには使わない）')
 
-    # --- 買うレースを選ぶ ---
-    print()
-    print('-' * 60)
-    print('買うレースを絞った場合（買わないレースは資金が減らない）')
-    print('-' * 60)
-    signals = backtest.race_signals(te)
-    curves = {}
-    for sig in ('edge2', 'edge3'):
-        c = backtest.coverage_curve(te, payouts, signals, sig,
-                                    n_pick=3, bet_type='ワイド')
-        curves[sig] = c
-        print(f'\nワイド3点 / 絞り込み = {sig}'
-              f'（AI上位{sig[-1]}頭の確率 − 市場の暗示確率）')
-        print(c[['戦略', '参加率%', '購入レース', '的中率%', '回収率%',
-                 '回収率95%区間', '黒字と言えるか', '収支']].to_string(index=False))
+    # 乖離。市場ありモデルより高く見ている馬＝市場が見落としている候補
+    te['divergence'] = te['score_free'] - te['score']
+    place = sg.attach_place_payout(te, payouts)
+    if not place.empty:
+        rows = []
+        for q, lab in [(0.0, '全頭'), (0.75, '乖離 上位25%'), (0.9, '乖離 上位10%')]:
+            s = place[place['divergence'] >= place['divergence'].quantile(q)]
+            rows.append({'条件': lab, '頭数': len(s),
+                         '複勝回収率%': round(s['fuku'].mean(), 1)})
+        print(pd.DataFrame(rows).to_string(index=False))
 
-    print()
-    print(backtest.explain())
+    # ---------------- 3. 除外と買い方 ----------------
+    print('\n【3】除外と買い方 — 回収率と参加率で測る')
+    ranked = te.sort_values('score', ascending=False)
+    ranked['_over'] = sg.overvalued(ranked)
+    skip = set(ranked.groupby('race_id').head(3)
+               .groupby('race_id')['_over'].sum().pipe(lambda x: x[x > 0]).index)
+    print(f'  上位3頭に過大評価の馬がいるレース: {len(skip):,}')
 
-    return {'stage': 'strategy', 'ok': True, 'auc_top3': auc3, 'auc_win': aucw,
-            'backtest': table, 'coverage': curves, 'signals': signals,
-            'model_top3': model_top3, 'model_win': model_win,
-            'features': feats, 'feature_df': df}
+    tri = payouts[payouts['bet_type'] == '三連複']
+    idx: Dict[str, list] = {}
+    for rid, hn, p in zip(tri['race_id'], tri['horse_numbers'], tri['payout']):
+        idx.setdefault(str(rid), []).append(
+            (frozenset(int(x) for x in hn), int(p)))
+
+    plans = [betting.plan_race(rid, g['horse_number'].astype(int).tolist(),
+                               g['score'].tolist(), skip=rid in skip)
+             for rid, g in te.groupby('race_id')]
+    result = betting.evaluate(plans, idx)
+    print(pd.DataFrame([result]).to_string(index=False))
+
+    reasons = pd.Series([p.reason for p in plans if not p.shape]).value_counts()
+    if len(reasons):
+        print('\n  買わなかった理由:')
+        print('    ' + reasons.to_string().replace('\n', '\n    '))
+    shapes = pd.Series([p.shape for p in plans if p.shape]).value_counts()
+    if len(shapes):
+        print('\n  選ばれた買い方:')
+        print('    ' + shapes.to_string().replace('\n', '\n    '))
+
+    print('\n  ※ 回収率は信頼区間で判断すること。'
+          '参加率を絞るほどレース数が減り、確認は難しくなる。')
+
+    return {'stage': 'strategy', 'ok': True, 'auc': auc,
+            'model_market': m_market, 'model_free': m_free,
+            'features_market': f_market, 'features_free': f_free,
+            'betting': result, 'plans': plans, 'skip_races': skip,
+            'feature_df': df, 'test': te, 'payout_index': idx}

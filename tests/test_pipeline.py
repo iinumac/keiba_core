@@ -318,6 +318,49 @@ def test_backtest():
     check('区間が回収率を挟む', lo <= both.roi <= hi, f'{lo:.0f}〜{hi:.0f} / {both.roi:.0f}')
 
 
+def test_speed_features():
+    """走破タイム・上がりの集計。レース内正規化とリーク防止。"""
+    print('\n[速度特徴量]')
+    import numpy as np
+    import pandas as pd
+    from keiba.features import add_speed_features
+
+    # 同じ馬が3走。タイムは条件で水準が違っても、レース内で正規化されるはず
+    d = pd.DataFrame({
+        'race_id': ['R1', 'R1', 'R1', 'R2', 'R2', 'R2', 'R3', 'R3', 'R3'],
+        'horse_id': ['H', 'A', 'B', 'H', 'A', 'B', 'H', 'A', 'B'],
+        'race_date': pd.to_datetime(
+            ['2024-01-01'] * 3 + ['2024-02-01'] * 3 + ['2024-03-01'] * 3),
+        # R1は短距離（速い）、R2は長距離（遅い）。水準が違っても相対化される
+        'time_seconds': [70.0, 71.0, 72.0, 130.0, 131.0, 132.0, 70.5, 70.0, 71.0],
+        'last_3f': [34.0, 35.0, 36.0, 36.0, 37.0, 38.0, 35.0, 34.0, 34.5],
+    })
+    out = add_speed_features(d).sort_values(['horse_id', 'race_date'])
+    h = out[out['horse_id'] == 'H']
+
+    check('レース内で正規化される（水準差が消える）',
+          abs(h['time_z'].iloc[0] - h['time_z'].iloc[1]) < 1e-9,
+          f"{h['time_z'].iloc[0]:.4f} / {h['time_z'].iloc[1]:.4f}")
+    check('速いほど time_z が大きい',
+          out[out['race_id'] == 'R1'].sort_values('time_seconds')['time_z'].is_monotonic_decreasing)
+
+    # 初出走は過去が無いので欠損
+    check('初出走の集計は欠損', bool(pd.isna(h['r3_time_z'].iloc[0])))
+    # 2走目は1走目だけを見る（当該レースを含めない＝リークしない）
+    check('2走目の集計は1走目のみを見る',
+          abs(h['r3_time_z'].iloc[1] - h['time_z'].iloc[0]) < 1e-9,
+          f"{h['r3_time_z'].iloc[1]:.4f} vs {h['time_z'].iloc[0]:.4f}")
+    check('過去最速の上がりは絶対値で取る',
+          abs(h['best_last_3f'].iloc[2] - 34.0) < 1e-9,
+          f"{h['best_last_3f'].iloc[2]}")
+
+    from keiba import stages
+    check('市場フリーの特徴量に速度が入っている',
+          set(stages.SPEED_FEATURES) <= set(stages.MARKET_FREE_FEATURES))
+    check('重複していた horse_expected_top3_rate は外してある',
+          'horse_expected_top3_rate' not in stages.MARKET_FREE_FEATURES)
+
+
 def test_market():
     """市場の見立てを3着内確率に揃える計算。"""
     print('\n[市場確率]')
@@ -483,7 +526,8 @@ def main():
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
                test_discovery_filters_to_jra, test_payouts,
-               test_payout_matches_odds, test_backtest, test_market,
+               test_payout_matches_odds, test_backtest,
+               test_speed_features, test_market,
                test_segments, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:

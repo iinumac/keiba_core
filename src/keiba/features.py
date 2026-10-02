@@ -71,6 +71,12 @@ class FeatureConfig:
     numeric_fills: dict = field(default_factory=dict)
     """impost / distance / horse_weight などの埋め値。"""
 
+    speed_features: bool = True
+    """走破タイム・上がり3F の集計を作るか。
+
+    レース内で正規化するため集計に数十秒かかる。不要なら False。
+    """
+
     # --- 市場（オッズ）系特徴量 ---
     market_features: bool = False
     takeout_rate: float = 0.2
@@ -181,6 +187,52 @@ def add_horse_features(df: pd.DataFrame, config: FeatureConfig) -> pd.DataFrame:
     return df
 
 
+def add_speed_features(df: pd.DataFrame) -> pd.DataFrame:
+    """走破タイムと上がり3Fから、馬の地力を測る特徴量を作る。
+
+    走破タイムは距離・馬場・馬場状態・ペースで水準がまるで違うため
+    （ダ1000m 60.2秒 / ダ2000m 127.4秒）、そのままでは使えない。
+
+    そこで**レース内で正規化**する。同じレースを走った馬との比較なので、
+    条件の差が自動的に消える。同一レースの他馬の情報を使うが、
+    レース結果は確定後に既知なのでリークではない。
+
+        time_z   = -(タイム - レース平均) / レース標準偏差   速いほど大きい
+        last3f_z = -(上がり - レース平均) / レース標準偏差
+
+    そのうえで馬ごとに過去の実績を集計する。shift() で当該レースを含めない。
+
+        r3_time_z     直近3走の平均。**実測で最も効く特徴量**
+        avg_time_z    過去平均
+        best_time_z   過去最高
+        best_last_3f  過去最速の上がり（絶対値）
+
+    これらを足すと市場フリーモデルの AUC は 0.7417 → 0.7527 に上がる。
+    ただし市場込みモデルには効かない（0.8212 → 0.8209）。
+    **市場は既にタイムと上がりを織り込んでいる。** docs/MARKET.md 参照。
+    """
+    df = df.copy()
+    t = pd.to_numeric(df.get('time_seconds'), errors='coerce')
+    l = pd.to_numeric(df.get('last_3f'), errors='coerce')
+    df['_t_raw'], df['_l_raw'] = t, l
+
+    for src, dst in (('_t_raw', 'time_z'), ('_l_raw', 'last3f_z')):
+        g = df.groupby('race_id')[src]
+        sd = g.transform('std').replace(0, np.nan)
+        df[dst] = -(df[src] - g.transform('mean')) / sd
+
+    df = df.sort_values(by=['horse_id', 'race_date'])
+    g = df.groupby('horse_id')
+    for col, base in (('time_z', 'time'), ('last3f_z', 'l3f')):
+        s = g[col]
+        df[f'best_{base}_z'] = s.transform(lambda x: x.shift().expanding().max())
+        df[f'avg_{base}_z'] = s.transform(lambda x: x.shift().expanding().mean())
+        df[f'r3_{base}_z'] = s.transform(lambda x: x.shift().rolling(3, min_periods=1).mean())
+    df['best_last_3f'] = g['_l_raw'].transform(lambda x: x.shift().expanding().min())
+
+    return df.drop(columns=['_t_raw', '_l_raw'])
+
+
 def add_added_value(df: pd.DataFrame) -> pd.DataFrame:
     """騎手・調教師の押し上げ力。
 
@@ -241,6 +293,8 @@ def build_features(races_df: pd.DataFrame, results_df: pd.DataFrame,
     """
     df = clean(races_df, results_df, config)
     df = add_horse_features(df, config)
+    if config.speed_features:
+        df = add_speed_features(df)
     df = add_added_value(df)
     df = add_course_features(df, config)
     if config.market_features:

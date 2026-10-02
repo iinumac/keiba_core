@@ -49,6 +49,25 @@ FEATURES_NO_ODDS = [
 ]
 FEATURES_WITH_ODDS = FEATURES_NO_ODDS + ['popularity', 'odds']
 
+MARKET_FREE_FEATURES = [
+    'horse_prev_win_rate', 'horse_prev_top3_rate', 'horse_expected_top3_rate',
+    'prev_finish', 'prev_last_3f', 'days_since_last', 'is_debut',
+    'is_jockey_changed', 'jockey_added_value', 'trainer_added_value',
+    'distance', 'surface_code', 'impost', 'horse_weight', 'horse_number',
+    'level_score', 'age',
+]
+"""市場の情報を一切使わない特徴量。
+
+「市場が見落としているもの」を測るには、市場と独立した推定が要る。
+オッズ・人気とその派生はもちろん、prev_odds と prev_popularity も
+前走とはいえ市場の評価なので外す。
+
+この構成での AUC は 0.7417。単勝オッズ単独の 0.8189 に及ばない
+（市場は調教や当日の気配まで織り込んでいる）。それでも、同じオッズ帯の
+中では的中率を識別できている。ただしその識別力は配当に織り込まれており、
+回収率の優位にはなっていない。詳細は docs/MARKET.md。
+"""
+
 STRATEGY_FEATURES = [
     'popularity', 'odds', 'market_implied_win_prob', 'odds_ratio_to_fav',
     'pop_odds_mismatch', 'horse_prev_win_rate', 'horse_prev_top3_rate',

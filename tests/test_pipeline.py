@@ -318,6 +318,36 @@ def test_backtest():
     check('区間が回収率を挟む', lo <= both.roi <= hi, f'{lo:.0f}〜{hi:.0f} / {both.roi:.0f}')
 
 
+def test_market():
+    """市場の見立てを3着内確率に揃える計算。"""
+    print('\n[市場確率]')
+    import numpy as np
+    from keiba import market
+
+    p = market.implied_win_prob(np.array([2.0, 4.0, 8.0, 16.0]))
+    check('勝率の合計が1', abs(p.sum() - 1.0) < 1e-9, f'{p.sum():.6f}')
+    check('オッズが低いほど勝率が高い', p[0] > p[1] > p[2] > p[3])
+
+    t3 = market.harville_top3(p)
+    check('3着内確率の合計が3（4頭立て）', abs(t3.sum() - 3.0) < 1e-6, f'{t3.sum():.4f}')
+    check('3着内確率は勝率以上', bool((t3 >= p - 1e-12).all()))
+    check('3着内確率は1以下', bool((t3 <= 1.0 + 1e-12).all()))
+    check('順序が保たれる', t3[0] > t3[1] > t3[2] > t3[3])
+
+    # 3頭なら全馬が3着内
+    p3 = market.implied_win_prob(np.array([2.0, 3.0, 6.0]))
+    t3b = market.harville_top3(p3)
+    check('3頭立てなら全馬の3着内確率が1', bool(np.allclose(t3b, 1.0, atol=1e-6)),
+          str(np.round(t3b, 4)))
+
+    # 市場フリーの特徴量に市場情報が混ざっていないこと
+    from keiba import stages
+    banned = {'odds', 'popularity', 'market_implied_win_prob', 'odds_ratio_to_fav',
+              'pop_odds_mismatch', 'prev_odds', 'prev_popularity'}
+    leaked = banned & set(stages.MARKET_FREE_FEATURES)
+    check('市場フリーの特徴量に市場情報が無い', not leaked, str(leaked))
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -411,7 +441,7 @@ def main():
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
                test_discovery_filters_to_jra, test_payouts,
-               test_payout_matches_odds, test_backtest, test_audit,
+               test_payout_matches_odds, test_backtest, test_market, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

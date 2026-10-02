@@ -497,6 +497,55 @@ def test_segments():
     check('4着は0', list(att['fuku'])[3] == 0)
 
 
+def test_betting():
+    """三連複の買い方。点数の数え方と、買わない判断。"""
+    print('\n[買い方]')
+    from keiba import betting as bt
+
+    order = [5, 3, 9, 1, 7, 2, 11]
+    for name, want in [('3頭BOX', 1), ('軸2頭→相手3頭', 3), ('4頭BOX', 4),
+                       ('軸2頭→相手5頭', 5), ('軸1頭→相手4頭', 6),
+                       ('軸1頭→相手5頭', 10), ('5頭BOX', 10)]:
+        got = len(bt.SHAPES[name](order))
+        check(f'{name} = {want}点', got == want, f'{got}')
+    check('どの買い方も上限10点以内',
+          all(len(f(order)) <= bt.MAX_POINTS for f in bt.SHAPES.values()))
+
+    # 軸2頭流しは軸2頭を必ず含む
+    combos = bt.SHAPES['軸2頭→相手3頭'](order)
+    check('軸2頭流しは軸を必ず含む',
+          all({order[0], order[1]} <= c for c in combos))
+
+    hn = [5, 3, 9, 1, 7, 2, 11, 4]
+    # 堅いレースは点数を絞る
+    p = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05])
+    check('堅いレースは少点数', p.shape == '軸2頭→相手3頭', str(p.shape))
+    # 混戦は買わない。点数を増やすのではない
+    p2 = bt.plan_race('R', hn, [.2, .2, .2, .2, .2, .1, .1, .05])
+    check('混戦は買わない', p2.shape is None and '混戦' in p2.reason, p2.reason)
+    # 外部から「買わない」を渡せる
+    p3 = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05], skip=True)
+    check('過大評価なら買わない', p3.shape is None, p3.reason)
+    # 少頭数も買わない
+    p4 = bt.plan_race('R', hn[:5], [.6, .5, .5, .3, .2])
+    check('少頭数は買わない', p4.shape is None, p4.reason)
+
+    # 同着は合算、買い目外は当たりにしない。
+    # スコアが同値のときは馬番の大きい方が先に来るので、軸は [5, 9] になる
+    plan = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05])
+    axis = sorted({h for c in plan.combos for h in c}
+                  & set.intersection(*[set(c) for c in plan.combos]))
+    check('同点時の軸が決まっている', axis == [5, 9], str(axis))
+
+    inside = sorted(plan.combos, key=sorted)[:2]
+    idx = {'R': [(inside[0], 1000),                 # 買い目に含まれる
+                 (inside[1], 2000),                 # これも含まれる（同着）
+                 (frozenset([2, 11, 4]), 9999)]}    # 含まれない
+    r = bt.evaluate([plan], idx)
+    check('同着を合算し、買い目外は除く', r['収支'] == 3000 - plan.cost,
+          f"{r['収支']} (cost {plan.cost})")
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -592,7 +641,7 @@ def main():
                test_discovery_filters_to_jra, test_payouts,
                test_payout_matches_odds, test_backtest,
                test_speed_features, test_recency_features, test_market,
-               test_segments, test_audit,
+               test_segments, test_betting, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

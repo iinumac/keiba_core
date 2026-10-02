@@ -1,7 +1,7 @@
 """パイプラインの連続実行
 
     from keiba import pipeline
-    pipeline.run(1, 4)                       # 取り込み〜予想まで通し
+    pipeline.run(1, 5)                       # 取り込み〜今週末の買い目まで通し
     pipeline.run(2, 3)                       # パースと学習だけ
     pipeline.run(1, 1, end=date(2026, 9, 27))  # 取り込みだけ、期間指定
 
@@ -34,7 +34,7 @@ def _resolve(ref: StageRef) -> str:
     return s
 
 
-def run(start_stage: StageRef = 1, end_stage: StageRef = 4,
+def run(start_stage: StageRef = 1, end_stage: StageRef = 5,
         push: bool = True,
         collect_start: Optional[dt.date] = None,
         collect_end: Optional[dt.date] = None,
@@ -78,8 +78,10 @@ def run(start_stage: StageRef = 1, end_stage: StageRef = 4,
             r = stages.build(push=push, workers=workers)
         elif name == 'train':
             r = stages.train(push=push)
-        else:
+        elif name == 'strategy':
             r = stages.strategy(push=push)
+        else:
+            r = stages.predict(push=push)
         r['elapsed_sec'] = round(time.time() - t, 1)
         results[name] = r
 

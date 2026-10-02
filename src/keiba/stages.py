@@ -22,12 +22,13 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-STAGES = ['collect', 'build', 'train', 'strategy']
+STAGES = ['collect', 'build', 'train', 'strategy', 'predict']
 STAGE_LABELS = {
     'collect': '1. 取り込み（HTML収集）',
     'build': '2. パース（ウェアハウス構築）',
     'train': '3. 学習（モデル・マスタ作成）',
-    'strategy': '4. 予想（戦略評価）',
+    'strategy': '4. 戦略評価（買い方の検証）',
+    'predict': '5. 予想（今週末の出馬表 → 買い目）',
 }
 
 TRAIN_END_YEAR = 2024
@@ -488,3 +489,93 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
             'features_market': f_market, 'features_free': f_free,
             'betting': result, 'plans': plans, 'skip_races': skip,
             'feature_df': df, 'test': te, 'payout_index': idx}
+
+
+# ---------------------------------------------------------------------------
+# 5. 予想（今週末）
+# ---------------------------------------------------------------------------
+def predict(push: bool = False, days_ahead: int = 10,
+            save_json: bool = True, strategy_result: Optional[Dict] = None) -> Dict:
+    """今週末の出馬表を取ってきて、買い目を出す。
+
+    JRA公式（jra.go.jp）は POST にトークンを渡す方式でURLを直接叩けないため、
+    netkeiba から race_id で取得する。詳細は docs/SHUTUBA.md。
+
+    `strategy_result` を渡さない場合は学習済みモデルを models/ から読む。
+    オッズが未発表（前日など）のレースは買い目を出せない。
+    """
+    import pickle
+    from . import betting, config, fetch, shutuba
+
+    _rule(STAGE_LABELS['predict'])
+
+    fetcher = fetch.Fetcher()
+    days = shutuba.upcoming_race_days(fetcher, days_ahead=days_ahead)
+    if not days:
+        print(f'  今後 {days_ahead} 日に開催はありません')
+        return {'stage': 'predict', 'ok': True, 'races': 0, 'plans': []}
+    print(f'  開催日: ' + ', '.join(f'{d:%m/%d}' for d in days))
+
+    def on_race(day, race_id, card):
+        if card:
+            mark = '○' if card.get('odds_available') else '×'
+            print(f'    {day} {card["venue_name"]} {card["race_num"]:>2}R '
+                  f'{(card["race_name"] or "")[:16]:18s} オッズ{mark}', flush=True)
+
+    cards = shutuba.fetch_weekend(fetcher, days_ahead=days_ahead, on_race=on_race)
+    print(f'  取得 {len(cards)} レース')
+
+    if save_json and cards:
+        out = config.DATA_DIR / 'shutuba'
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f'{cards[0]["date"]}_weekend.json'
+        path.write_text(shutuba.to_json(cards), encoding='utf-8')
+        print(f'  保存: {path}')
+
+    # オッズが出ているレースだけ買い目を出す。
+    #
+    # スコアは「3着内確率」でなければならない。確信度の閾値（1.4）は
+    # 上位3頭の3着内確率の合計で較正してある。1/オッズ をそのまま使うと
+    # 尺度が違い（全馬の合計が約1.25）、常に閾値を下回って全レース見送りになる。
+    # 単勝オッズ → 勝率 → 3着内確率（Harville）へ変換する。
+    import numpy as np
+    from . import market
+
+    plans = []
+    no_odds_races = 0
+    for card in cards:
+        hs = [h for h in card['horses'] if h.get('odds')]
+        if len(hs) < 3:
+            no_odds_races += 1
+            continue
+        win = market.implied_win_prob(np.array([h['odds'] for h in hs], dtype=float))
+        top3 = market.harville_top3(win)
+        plan = betting.plan_race(card['race_id'],
+                                 [h['horse_number'] for h in hs], list(top3))
+        plans.append((card, plan))
+
+    bought = [(c, p) for c, p in plans if p.shape]
+    print(f'\n  買い目を出せたレース: {len(bought)} / {len(plans)}')
+    for card, plan in bought:
+        combos = sorted(tuple(sorted(c)) for c in plan.combos)
+        print(f'    {card["venue_name"]} {card["race_num"]:>2}R '
+              f'{(card["race_name"] or "")[:14]:16s} 確信度{plan.confidence:.2f} '
+              f'{plan.shape}（{plan.points}点）')
+        print(f'      {combos}')
+
+    skipped = pd.Series([p.reason for _, p in plans if not p.shape]).value_counts()
+    if len(skipped):
+        print('\n  見送り:')
+        print('    ' + skipped.to_string().replace('\n', '\n    '))
+
+    no_odds = no_odds_races
+    if no_odds:
+        print(f'\n  ※ オッズ未発表 {no_odds} レース。'
+              f'発走が近づいてから再実行してください')
+
+    if push and save_json and cards:
+        from . import gitpush
+        gitpush.push(['data/shutuba'], f'Add race cards for {cards[0]["date"]}')
+
+    return {'stage': 'predict', 'ok': True, 'races': len(cards),
+            'cards': cards, 'plans': plans, 'bought': bought}

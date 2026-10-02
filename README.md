@@ -40,11 +40,12 @@ df = pd.read_parquet('data/warehouse/results/year=2025/part.parquet')
 
 | | 役割 | 出力 |
 |---|---|---|
-| [`00_run`](notebooks/00_run.ipynb) | **1〜4 を範囲指定してまとめて実行** | — |
+| [`00_run`](notebooks/00_run.ipynb) | **1〜5 を範囲指定してまとめて実行。通常はこれだけ使う** | — |
 | [`01_collect`](notebooks/01_collect.ipynb) | 1. 取り込み — 新しいレースを検知して HTML を取得 | `data/html/YYYY/*.html` |
 | [`02_build`](notebooks/02_build.ipynb) | 2. パース — 増えた分だけウェアハウスへ | `data/warehouse/` |
 | [`03_train`](notebooks/03_train.ipynb) | 3. 学習 — 3着内確率モデルとマスタ | `models/`, `data/master/` |
-| [`04_strategy`](notebooks/04_strategy.ipynb) | 4. 予想 — 三連複の戦略評価と買い目 | 画面出力 |
+| [`04_strategy`](notebooks/04_strategy.ipynb) | 4. 戦略評価 — 買い方の検証 | 画面出力 |
+| （5. 予想） | 今週末の出馬表を取得して買い目を出す（00_run のステージ5） | `data/shutuba/` |
 | [`90_analysis`](notebooks/90_analysis.ipynb) | 分析 — SQL による自由分析（独立） | — |
 
 01〜04 が一本のパイプライン、90 はそれを横から覗く道具。
@@ -55,9 +56,10 @@ df = pd.read_parquet('data/warehouse/results/year=2025/part.parquet')
 ```python
 from keiba import pipeline
 
-pipeline.run(1, 4)          # 取り込み → パース → 学習 → 予想
+pipeline.run(1, 5)          # 取り込み → パース → 学習 → 戦略評価 → 今週末の買い目
 pipeline.run(2, 3)          # パースと学習だけ
-pipeline.run('train', 4)    # 名前でも指定できる
+pipeline.run('train', 5)    # 名前でも指定できる
+pipeline.run(5, 5)          # 今週末の買い目だけ
 ```
 
 途中の段が失敗したらそこで止まる。前の段の出力が次の段の入力になるため、

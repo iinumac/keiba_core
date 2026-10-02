@@ -582,6 +582,16 @@ def test_shutuba():
     check('Icon_GradeType15 はリステッド', shutuba.GRADE_ICON.get('15') == 'L')
     check('Icon_GradeType1 は G1', shutuba.GRADE_ICON.get('1') == 'G1')
 
+    # オッズをそのまま使うと尺度が合わない。3着内確率に直す必要がある
+    import numpy as np
+    from keiba import market
+    odds = np.array([2.0, 4.0, 8.0, 16.0, 30.0, 50.0, 80.0, 100.0])
+    naive = sorted(1.0 / odds, reverse=True)[:3]
+    proper = sorted(market.harville_top3(market.implied_win_prob(odds)), reverse=True)[:3]
+    check('1/オッズ の上位3頭合計は閾値に届かない', sum(naive) < 1.4,
+          f'{sum(naive):.2f}')
+    check('Harville なら閾値と同じ尺度になる', sum(proper) > 1.4, f'{sum(proper):.2f}')
+
     check('race_id の抽出', shutuba.RACE_ID_RE.findall(
         'a href="/race/shutuba.html?race_id=202605040111"') == ['202605040111'])
 
@@ -626,7 +636,7 @@ def test_pipeline_range():
     check('文字列の番号でも指定できる', pipeline._resolve('2') == 'build')
     check('名前で指定できる', pipeline._resolve('train') == 'train')
 
-    for bad in (0, 5, 'unknown'):
+    for bad in (0, 6, 'unknown'):
         try:
             pipeline._resolve(bad)
             check(f'不正な指定 {bad!r} を拒否', False)
@@ -639,7 +649,9 @@ def test_pipeline_range():
     except ValueError:
         check('開始が終了より後なら拒否', True)
 
-    check('ステージは4段', stages.STAGES == ['collect', 'build', 'train', 'strategy'])
+    check('ステージは5段',
+          stages.STAGES == ['collect', 'build', 'train', 'strategy', 'predict'],
+          str(stages.STAGES))
     check('全ステージにラベルがある',
           all(s in stages.STAGE_LABELS for s in stages.STAGES))
 

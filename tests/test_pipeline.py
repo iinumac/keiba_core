@@ -299,6 +299,24 @@ def test_backtest():
 
     check('必要レース数は赤字なら None', r2.races_to_confirm is None)
 
+    # 買わないレースは資金が減らない
+    te2 = pd.concat([te, te.assign(race_id='R2')], ignore_index=True)
+    pay2 = pd.concat([pay, pay.assign(race_id='R2')], ignore_index=True)
+    only_r1 = backtest.run(te2, pay2, label='t', column='score', n_pick=4,
+                           bet_type='三連複', min_runners=8, bet_races={'R1'})
+    check('対象レースは2、購入は1',
+          only_r1.candidates == 2 and only_r1.races == 1,
+          f'{only_r1.candidates}/{only_r1.races}')
+    check('参加率が50%', abs(only_r1.coverage - 50.0) < 1e-9)
+    check('買わない分は購入額に含めない', only_r1.cost == 400, f'{only_r1.cost}')
+
+    # 信頼区間
+    both = backtest.run(te2, pay2, label='t', column='score', n_pick=4,
+                        bet_type='三連複', min_runners=8)
+    check('信頼区間が出る', both.roi_ci95 is not None)
+    lo, hi = both.roi_ci95
+    check('区間が回収率を挟む', lo <= both.roi <= hi, f'{lo:.0f}〜{hi:.0f} / {both.roi:.0f}')
+
 
 def test_audit():
     print('\n[抜けの検出]')

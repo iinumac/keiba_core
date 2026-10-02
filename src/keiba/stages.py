@@ -382,10 +382,29 @@ def strategy(push: bool = False, bet_types: Optional[List[str]] = None) -> Dict:
     print()
     print(table.to_string(index=False))
     print()
-    print(backtest.explain())
     print('「控除率後の基準」はランダムに買ったときの収束先。'
           'これを上回った分がモデルの実力で、100%に届いて初めて黒字になる。')
 
+    # --- 買うレースを選ぶ ---
+    print()
+    print('-' * 60)
+    print('買うレースを絞った場合（買わないレースは資金が減らない）')
+    print('-' * 60)
+    signals = backtest.race_signals(te)
+    curves = {}
+    for sig in ('edge2', 'edge3'):
+        c = backtest.coverage_curve(te, payouts, signals, sig,
+                                    n_pick=3, bet_type='ワイド')
+        curves[sig] = c
+        print(f'\nワイド3点 / 絞り込み = {sig}'
+              f'（AI上位{sig[-1]}頭の確率 − 市場の暗示確率）')
+        print(c[['戦略', '参加率%', '購入レース', '的中率%', '回収率%',
+                 '回収率95%区間', '黒字と言えるか', '収支']].to_string(index=False))
+
+    print()
+    print(backtest.explain())
+
     return {'stage': 'strategy', 'ok': True, 'auc_top3': auc3, 'auc_win': aucw,
-            'backtest': table, 'model_top3': model_top3, 'model_win': model_win,
+            'backtest': table, 'coverage': curves, 'signals': signals,
+            'model_top3': model_top3, 'model_win': model_win,
             'features': feats, 'feature_df': df}

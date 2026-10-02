@@ -1,6 +1,20 @@
 """買い目戦略のバックテスト
 
-**的中率と回収率は両方見ないと判断できない。**
+## 全レース買う前提をやめる
+
+全レースを買うと毎回控除率を払うので、回収率は構造的に 100 - 控除率 に
+収束する。モデルの上乗せが +4.3pt あっても +22.5pt には届かない。
+
+**買わないレースは回収率100%** （資金が減らない）。したがって勝ち筋は
+
+  1. 買うレースを選ぶ（参加率を下げる）
+  2. 買う点数を減らす
+  3. 残したレースで上乗せを稼ぐ
+
+となる。評価も「全レースの回収率」ではなく
+**「参加率」と「購入したレースの回収率」**の組で見る。
+
+## 的中率と回収率は両方見ないと判断できない
 
 - 的中率だけ見ると、点数を増やせば必ず上がるので「良い戦略」に見えてしまう
 - 回収率だけ見ると、ごく稀な超高配当1本に支配される。実データの三連単には
@@ -52,7 +66,10 @@ def points_for(bet_type: str, n_pick: int) -> int:
 class Result:
     label: str
     bet_type: str
+    candidates: int = 0
+    """評価対象になったレース数（買わなかったものも含む）。"""
     races: int = 0
+    """実際に購入したレース数。"""
     points_per_race: float = 0.0
     cost: int = 0
     payout: int = 0
@@ -62,8 +79,33 @@ class Result:
     hit_payouts: List[int] = field(default_factory=list)
 
     @property
+    def coverage(self) -> float:
+        """参加率。対象レースのうち何%を買ったか。"""
+        return 100 * self.races / self.candidates if self.candidates else 0.0
+
+    @property
     def hit_rate(self) -> float:
+        """購入したレースのうち当たった割合。"""
         return 100 * self.hits / self.races if self.races else 0.0
+
+    @property
+    def profit(self) -> int:
+        return self.payout - self.cost
+
+    @property
+    def overall_roi(self) -> float:
+        """買わなかったレースも含めた資金ベースの回収率。
+
+        買わなければ減らないので、参加率が低いほど100%に近づく。
+        «全レースを1点ずつ買う» との比較には使えないが、
+        資金がどれだけ目減りするかの実感に近い。
+        """
+        if not self.candidates:
+            return 0.0
+        avg_cost = self.points_per_race * UNIT
+        notional = self.candidates * avg_cost
+        skipped = (self.candidates - self.races) * avg_cost
+        return 100 * (self.payout + skipped) / notional if notional else 0.0
 
     @property
     def roi(self) -> float:
@@ -96,6 +138,30 @@ class Result:
         return float(np.mean(self.returns)) / sd if sd else 0.0
 
     @property
+    def roi_ci95(self) -> Optional[Tuple[float, float]]:
+        """回収率の95%信頼区間。
+
+        少数レースで出た「回収率100%超」は、ほぼ必ず区間が100%をまたぐ。
+        参加率を絞るほどレース数が減り、区間は広がる。
+        数字の大小ではなく区間で判断すること。
+        """
+        if len(self.returns) < 2 or not self.points_per_race:
+            return None
+        per_race_cost = self.points_per_race * UNIT
+        arr = np.asarray(self.returns, dtype=float)
+        se = float(np.std(arr, ddof=1)) / math.sqrt(len(arr))
+        mu = float(np.mean(arr))
+        lo = 100 * (1 + (mu - 1.96 * se) / per_race_cost)
+        hi = 100 * (1 + (mu + 1.96 * se) / per_race_cost)
+        return (lo, hi)
+
+    @property
+    def significantly_profitable(self) -> bool:
+        """95%信頼区間の下限が100%を超えているか。"""
+        ci = self.roi_ci95
+        return ci is not None and ci[0] > 100.0
+
+    @property
     def races_to_confirm(self) -> Optional[int]:
         """回収率が100%を超えていると95%の確からしさで言うのに必要なレース数。
 
@@ -114,13 +180,18 @@ class Result:
         return {
             '戦略': self.label,
             '点数': round(self.points_per_race, 1),
-            'レース': self.races,
+            '参加率%': round(self.coverage, 1),
+            '購入レース': self.races,
             '的中': self.hits,
             '的中率%': round(self.hit_rate, 2),
             '回収率%': round(self.roi, 1),
             '最高配当除く%': round(self.roi_excl_top, 1),
             '最高配当の寄与%': round(self.top_share, 1),
             '配当中央値': int(self.median_payout),
+            '回収率95%区間': (f'{self.roi_ci95[0]:.0f}〜{self.roi_ci95[1]:.0f}'
+                           if self.roi_ci95 else None),
+            '黒字と言えるか': '◯' if self.significantly_profitable else '×',
+            '収支': self.profit,
             '収支/σ': round(self.sharpe, 4),
             '要レース数': self.races_to_confirm,
         }
@@ -142,7 +213,8 @@ def payout_index(payouts: pd.DataFrame, bet_type: str
 def run(test: pd.DataFrame, payouts: pd.DataFrame, *,
         label: str, column: str, n_pick: int,
         bet_type: str = '三連複', ascending: bool = False,
-        min_runners: int = 8) -> Result:
+        min_runners: int = 8,
+        bet_races: Optional[set] = None) -> Result:
     """上位 n_pick 頭の BOX を買ったときの成績。
 
     Args:
@@ -151,6 +223,8 @@ def run(test: pd.DataFrame, payouts: pd.DataFrame, *,
         column: 並べ替えに使う列（AI確率、人気 など）
         n_pick: 何頭を買い目に含めるか
         bet_type: 券種。必要頭数と、着順が関係するか（点数の数え方）を決める
+        bet_races: 購入する race_id の集合。None なら全レース購入。
+            指定すると、それ以外は「買わない」＝資金が減らない扱いになる。
     """
     if bet_type not in BET_SPEC:
         raise ValueError(f'未対応の券種: {bet_type}')
@@ -169,6 +243,10 @@ def run(test: pd.DataFrame, payouts: pd.DataFrame, *,
         if not wins:          # その券種が発売されていないレースは対象外
             continue
 
+        res.candidates += 1
+        if bet_races is not None and rid not in bet_races:
+            continue
+
         picks = set(g.sort_values(column, ascending=ascending)
                      .head(n_pick)['horse_number'].astype(int))
         cost = points * UNIT
@@ -185,6 +263,65 @@ def run(test: pd.DataFrame, payouts: pd.DataFrame, *,
     return res
 
 
+def race_signals(test: pd.DataFrame, prob_col: str = 'pred_top3',
+                 takeout: float = 0.2) -> pd.DataFrame:
+    """「このレースを買うべきか」の判断材料をレース単位で作る。
+
+    買わないレースは回収率100%（資金が減らない）。したがって全レースを
+    買うのではなく、優位がありそうなレースだけを選ぶ必要がある。
+
+    Returns:
+        race_id を index に、次の列を持つ DataFrame
+
+        top1 / top2_sum / top3_sum
+            AIが上位に置いた馬の確率。モデルの確信度
+        mkt2 / mkt3
+            同じ馬の市場暗示確率の合計（(1-控除率)/オッズ）
+        edge2 / edge3
+            AIの確率 − 市場の確率。**市場が見落としている度合い**
+        runners / top1_odds / top1_pop
+    """
+    t = test.sort_values(prob_col, ascending=False)
+    g = t.groupby('race_id')
+    imp = t.assign(_imp=(1.0 - takeout) / t['odds']).groupby('race_id')['_imp']
+
+    out = pd.DataFrame({
+        # pandas 2系の nth(0) は行そのものを返しインデックスが揃わないため first を使う
+        'top1': g[prob_col].first(),
+        'top2_sum': g[prob_col].apply(lambda s: s.head(2).sum()),
+        'top3_sum': g[prob_col].apply(lambda s: s.head(3).sum()),
+        'mkt2': imp.apply(lambda s: s.head(2).sum()),
+        'mkt3': imp.apply(lambda s: s.head(3).sum()),
+        'runners': g.size(),
+        'top1_odds': g['odds'].first(),
+        'top1_pop': g['popularity'].first(),
+    })
+    out['edge2'] = out['top2_sum'] - out['mkt2']
+    out['edge3'] = out['top3_sum'] - out['mkt3']
+    return out
+
+
+def coverage_curve(test: pd.DataFrame, payouts: pd.DataFrame, signals: pd.DataFrame,
+                   signal: str, *, n_pick: int = 3, bet_type: str = 'ワイド',
+                   prob_col: str = 'pred_top3',
+                   quantiles: Sequence[float] = (0.0, 0.5, 0.75, 0.9, 0.95, 0.99)
+                   ) -> pd.DataFrame:
+    """シグナルで上位から絞ったときに、回収率がどう動くかを並べる。
+
+    参加率を下げるほどレース数が減り、信頼区間が広がる。
+    「回収率が上がった」だけでなく「区間が100%を超えたか」で判断すること。
+    """
+    rows = []
+    for q in quantiles:
+        th = signals[signal].quantile(q)
+        ids = set(signals.index[signals[signal] >= th])
+        label = '全レース' if q == 0.0 else f'上位{round((1 - q) * 100)}%'
+        r = run(test, payouts, label=f'{signal} {label}', column=prob_col,
+                n_pick=n_pick, bet_type=bet_type, bet_races=ids)
+        rows.append(r.as_row())
+    return pd.DataFrame(rows)
+
+
 def compare(results: Sequence[Result]) -> pd.DataFrame:
     return pd.DataFrame([r.as_row() for r in results])
 
@@ -199,6 +336,9 @@ def explain() -> str:
   最高配当の寄与% 払戻全体に占める最高配当1本の割合
   配当中央値     当たったときの配当の中央値。平均は外れ値に引っ張られる
   収支/σ         1レースあたり収支の 平均÷標準偏差。ブレに対する稼ぎの効率
+  回収率95%区間  回収率の信頼区間。少数レースで出た100%超はほぼ必ず
+                 100%をまたぐ。数字の大小ではなく区間で判断する
+  黒字と言えるか 区間の下限が100%を超えているか
   要レース数     回収率が100%超だと95%の確からしさで言うのに必要なレース数。
                  的中率が低いほど跳ね上がる。現実的に回せる回数を超えるなら、
                  期待値がプラスでも実用にならない

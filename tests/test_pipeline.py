@@ -567,6 +567,29 @@ def test_strategy_stage_order():
           bool(banned & set(stages.STRATEGY_FEATURES)))
 
 
+def test_shutuba():
+    """出馬表の取得。通信せずに検証できる部分のみ。"""
+    print('\n[出馬表]')
+    from keiba import shutuba, fetch
+
+    # 文字コードはホストで違う。一律 EUC-JP にすると出馬表が文字化けする
+    check('db.netkeiba は EUC-JP',
+          fetch.encoding_for('https://db.netkeiba.com/race/202601010101') == 'EUC-JP')
+    check('race.netkeiba は UTF-8',
+          fetch.encoding_for('https://race.netkeiba.com/race/shutuba.html') == 'UTF-8')
+
+    # グレードのアイコンは2桁のことがある。15 を 1（G1）と誤認しないこと
+    check('Icon_GradeType15 はリステッド', shutuba.GRADE_ICON.get('15') == 'L')
+    check('Icon_GradeType1 は G1', shutuba.GRADE_ICON.get('1') == 'G1')
+
+    check('race_id の抽出', shutuba.RACE_ID_RE.findall(
+        'a href="/race/shutuba.html?race_id=202605040111"') == ['202605040111'])
+
+    check('斤量をfloatに', shutuba._try_float('57.0 kg') == 57.0)
+    check('Rをintに', shutuba._try_int('11R') == 11)
+    check('数字が無ければ None', shutuba._try_int('') is None)
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -662,7 +685,8 @@ def main():
                test_discovery_filters_to_jra, test_payouts,
                test_payout_matches_odds, test_backtest,
                test_speed_features, test_recency_features, test_market,
-               test_segments, test_betting, test_strategy_stage_order,
+               test_segments, test_betting, test_shutuba,
+               test_strategy_stage_order,
                test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:

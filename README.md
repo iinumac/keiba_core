@@ -201,6 +201,11 @@ Git の差分が小さく、pandas / polars / DuckDB のどれからでも読め
 | `store` | Parquet の読み書きと DuckDB |
 | `features` | 特徴量計算（03 と 04 で共用） |
 | `strategy` | 三連複の期待値予想エンジン |
+| `shutuba` | 週末の出馬表とオッズの取得 |
+| `betting` | 三連複の買い方の決定 |
+| `market` | 単勝オッズ → 3着内確率（Harville） |
+| `segments` | レースの区分と市場バイアスの判定 |
+| `backtest` | 的中率と回収率による戦略評価 |
 | `gitpush` | 成果物の GitHub 保存 |
 
 ---
@@ -253,4 +258,5 @@ HTML はあるがウェアハウスに入っていないものが 69 件ある�
 - [`docs/MARKET.md`](docs/MARKET.md) — 市場を上回れているかの検証と結論
 - [`docs/SEGMENTS.md`](docs/SEGMENTS.md) — どのレースが荒れ、どのレースが儲かるか
 - [`docs/BETTING.md`](docs/BETTING.md) — 三連複の買い方と、買わない判断の閾値
+- [`docs/SHUTUBA.md`](docs/SHUTUBA.md) — 週末の出馬表の取得（JRA公式が直リンク不可な件を含む）
 - [`docs/odds_deepresearch.md`](docs/odds_deepresearch.md) — オッズ断層の理論

@@ -23,6 +23,18 @@ import requests
 
 from . import config
 
+def encoding_for(url: str) -> str:
+    """URL からページの文字コードを決める。
+
+    netkeiba はホストで文字コードが違う。
+      db.netkeiba.com    （結果データベース）  EUC-JP
+      race.netkeiba.com  （出馬表・オッズ）     UTF-8
+
+    一律に EUC-JP を指定すると出馬表が文字化けする。
+    """
+    return 'EUC-JP' if '//db.netkeiba.com' in url else 'UTF-8'
+
+
 BROWSER_HEADERS = {
     'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
@@ -89,7 +101,7 @@ class Fetcher:
             try:
                 self._throttle()
                 r = self.session.get(url, headers=headers, timeout=self.timeout)
-                r.encoding = 'EUC-JP'
+                r.encoding = encoding_for(url)
                 if r.status_code in (429, 503):
                     self._count('rate_limited')
                     time.sleep(backoff)

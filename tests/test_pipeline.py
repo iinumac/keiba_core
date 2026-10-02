@@ -348,6 +348,48 @@ def test_market():
     check('市場フリーの特徴量に市場情報が無い', not leaked, str(leaked))
 
 
+def test_segments():
+    """レースの区分。荒れ具合と回収率は別物なので両方出せること。"""
+    print('\n[区分]')
+    import pandas as pd
+    from keiba import segments as sg
+
+    cases = [('第71回優駿牝馬(G1)', 'S', 'G1'),
+             ('きさらぎ賞(G3)', 'B', 'G3'),
+             ('3歳未勝利', 'E', '未勝利'),
+             ('2歳新馬', 'E', '新馬'),
+             # 特別競走は名前にクラスが出ないので賞金ベースで補完する
+             ('知床特別', 'D', '1-2勝'),
+             ('サンライズステークス', 'C', 'OP・3勝')]
+    for name, lv, want in cases:
+        got = sg.race_grade(name, lv)
+        check(f'{name} → {want}', got == want, '' if got == want else f'→ {got}')
+
+    d = pd.DataFrame({
+        'race_id': ['R1'] * 4,
+        'horse_number': [1, 2, 3, 4],
+        'finish_position': [1, 2, 3, 4],
+        'popularity': [1, 3, 7, 14],
+        'distance': [1200, 1800, 2200, 2800],
+        'race_name': ['3歳未勝利'] * 4,
+        'race_level': ['E'] * 4,
+    })
+    seg = sg.add_segments(d)
+    check('距離の区分が付く',
+          list(seg['dist_band']) == ['~1500', '1600-1900', '2000-2300', '2600~'],
+          str(list(seg['dist_band'])))
+    check('人気帯が付く',
+          list(seg['pop_band']) == ['1番人気', '2-3', '6-8', '13-'],
+          str(list(seg['pop_band'])))
+
+    # 複勝払戻の紐づけ。3着内でなければ0
+    pay = pd.DataFrame({'race_id': ['R1'] * 3, 'bet_type': ['複勝'] * 3,
+                        'horse_numbers': [[1], [2], [3]], 'payout': [110, 150, 300]})
+    att = sg.attach_place_payout(seg, pay)
+    check('3着内に払戻が付く', list(att['fuku'])[:3] == [110, 150, 300])
+    check('4着は0', list(att['fuku'])[3] == 0)
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -441,7 +483,8 @@ def main():
                test_warehouse_integrity, test_validate_rejects_empty_pages,
                test_course_notation, test_features,
                test_discovery_filters_to_jra, test_payouts,
-               test_payout_matches_odds, test_backtest, test_market, test_audit,
+               test_payout_matches_odds, test_backtest, test_market,
+               test_segments, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

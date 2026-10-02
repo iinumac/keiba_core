@@ -251,4 +251,5 @@ HTML はあるがウェアハウスに入っていないものが 69 件ある�
 - [`docs/FEATURES.md`](docs/FEATURES.md) — 特徴量の定義と未決の論点
 - [`docs/PAYOUTS.md`](docs/PAYOUTS.md) — 払戻データのパターンと、戦略評価の考え方
 - [`docs/MARKET.md`](docs/MARKET.md) — 市場を上回れているかの検証と結論
+- [`docs/SEGMENTS.md`](docs/SEGMENTS.md) — どのレースが荒れ、どのレースが儲かるか
 - [`docs/odds_deepresearch.md`](docs/odds_deepresearch.md) — オッズ断層の理論

@@ -77,6 +77,55 @@ def harville_top3(win_prob: np.ndarray) -> np.ndarray:
     return np.clip(out, 0.0, 1.0)
 
 
+SUPPORT_TOP3_COEF = (4.335173265529065,          # 切片
+                     2.2779574662938504,         # log(支持率)
+                     0.3833137008563749,         # log(支持率)^2
+                     0.03992235560882695,        # log(支持率)^3
+                     -0.6340271100142684,        # log(頭数)
+                     -0.061655305542466475)      # log(支持率) * log(頭数)
+"""`top3_from_support` の係数。2024年までの全レースで学習（fit_support_top3）。"""
+
+
+def _support_terms(support: np.ndarray, n_runners) -> np.ndarray:
+    ls = np.log(np.clip(np.asarray(support, float), 1e-4, 1.0))
+    ln = np.log(np.broadcast_to(np.asarray(n_runners, float), ls.shape))
+    return np.column_stack([ls, ls ** 2, ls ** 3, ln, ls * ln])
+
+
+def top3_from_support(odds: np.ndarray, coef=SUPPORT_TOP3_COEF) -> np.ndarray:
+    """単勝オッズ（1レース分）から、市場の3着内確率を出す。
+
+    単勝オッズの逆数をレース内で正規化したもの（**支持率**）は、実際の勝率と
+    ほぼ一致する。ところが勝率から3着内率を出す Harville の式は偏る
+    （人気馬で最大10pt過大、中穴で2〜3pt過小）。
+
+    そこで、実際に3着内に入ったかどうかを log(支持率) の多項式と頭数で
+    ロジスティック回帰した。支持率の帯ごとの誤差は概ね1pt以内
+    （2024年までで学習、2025年以降で検証）。docs/MARKET.md「5.」。
+    """
+    o = np.asarray(odds, float)
+    sup = implied_win_prob(o)
+    z = coef[0] + _support_terms(sup, len(o)) @ np.asarray(coef[1:])
+    p = 1.0 / (1.0 + np.exp(-z))
+    p[~(np.isfinite(o) & (o > 0))] = np.nan
+    return p
+
+
+def fit_support_top3(df: pd.DataFrame, odds_col: str = 'odds',
+                     race_col: str = 'race_id', target: str = 'is_top3'):
+    """`SUPPORT_TOP3_COEF` を学習し直す。(切片, 係数...) を返す。"""
+    from sklearn.linear_model import LogisticRegression
+    d = df[[race_col, odds_col, target]].copy()
+    d[odds_col] = pd.to_numeric(d[odds_col], errors='coerce')
+    d = d[d[odds_col] > 0]
+    inv = 1.0 / d[odds_col]
+    sup = inv / inv.groupby(d[race_col]).transform('sum')
+    n = d.groupby(race_col)[race_col].transform('size')
+    X = _support_terms(sup.to_numpy(), n.to_numpy())
+    lr = LogisticRegression(C=10, max_iter=2000).fit(X, d[target])
+    return (float(lr.intercept_[0]),) + tuple(float(c) for c in lr.coef_[0])
+
+
 def add_market_probs(df: pd.DataFrame, odds_col: str = 'odds',
                      race_col: str = 'race_id') -> pd.DataFrame:
     """`p_mkt_win` と `p_mkt_top3` を付けて返す。

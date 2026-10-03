@@ -479,6 +479,15 @@ def test_market():
     leaked = banned & set(stages.MARKET_FREE_FEATURES)
     check('市場フリーの特徴量に市場情報が無い', not leaked, str(leaked))
 
+    # 支持率の式。Harville と違い、人気馬を過大評価しない
+    odds = np.array([1.8, 4.5, 8.0, 12.0, 20.0, 35.0, 60.0, 100.0, 150.0, 200.0])
+    p = market.top3_from_support(odds)
+    hv = market.harville_top3(market.implied_win_prob(odds))
+    check('支持率の式は確率の範囲', ((p > 0) & (p < 1)).all())
+    check('支持率の式はオッズに対して単調', (np.diff(p) < 0).all(), f'{np.round(p, 3)}')
+    check('人気馬は Harville より低く見積もる', p[0] < hv[0], f'{p[0]:.3f} / {hv[0]:.3f}')
+    check('中穴は Harville より高く見積もる', p[5] > hv[5], f'{p[5]:.3f} / {hv[5]:.3f}')
+    check('不正なオッズは欠損', np.isnan(market.top3_from_support(np.array([2.0, 0.0, 5.0])))[1])
 
 def test_segments():
     """レースの区分。荒れ具合と回収率は別物なので両方出せること。"""

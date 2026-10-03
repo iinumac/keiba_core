@@ -710,6 +710,8 @@ def test_shutuba():
     check('オッズの状態を日本語に', shutuba.ODDS_STATUS.get('final') == '確定')
     check('発売中は前日に限らない', shutuba.ODDS_STATUS.get('middle') == '発売中')
     check('発走後の result も確定', shutuba.ODDS_STATUS.get('result') == '確定')
+    # init は1時間近く古いことがある。update を先に試す
+    check('オッズは update を先に取る', shutuba.ODDS_ACTIONS[0] == 'update')
 
     check('斤量をfloatに', shutuba._try_float('57.0 kg') == 57.0)
     check('Rをintに', shutuba._try_int('11R') == 11)

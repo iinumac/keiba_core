@@ -91,16 +91,33 @@ def fetch_odds(race_id: str, fetcher: Fetcher) -> Dict:
          'updated_at': '2026-10-02 23:42:16', 'status': 'middle'}
         未発表なら odds は空。
     """
-    resp = fetcher.get(
-        f'{RACE_HOST}/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init',
-        referer=f'{RACE_HOST}/odds/index.html?race_id={race_id}')
+    # action=init は1時間近く前のスナップショットを返すことがある
+    # （13:24 に取得して 12:55 時点）。update は最新を返すので先に試し、
+    # 空なら init に戻す。前日など update がまだ空を返す場面がある
     empty = {'odds': {}, 'updated_at': None, 'status': None}
+    for action in ODDS_ACTIONS:
+        got = _fetch_odds_once(race_id, fetcher, action)
+        if got['odds']:
+            return got
+        empty = got if got['status'] else empty
+    return empty
+
+
+ODDS_ACTIONS = ('update', 'init')
+"""オッズAPI の action。update が最新、init は古いことがある。"""
+
+
+def _fetch_odds_once(race_id: str, fetcher: Fetcher, action: str) -> Dict:
+    empty = {'odds': {}, 'updated_at': None, 'status': None}
+    resp = fetcher.get(
+        f'{RACE_HOST}/api/api_get_jra_odds.html?race_id={race_id}&type=1&action={action}',
+        referer=f'{RACE_HOST}/odds/index.html?race_id={race_id}')
     if resp is None or resp.status_code != 200:
         return empty
     try:
         payload = json.loads(resp.text)
-        data = payload.get('data', {})
-        table = data.get('odds', {}).get('1', {})
+        data = payload.get('data') or {}
+        table = (data.get('odds') or {}).get('1') or {}
     except (ValueError, AttributeError):
         return empty
 

@@ -313,6 +313,65 @@ def fetch_weekend(fetcher: Optional[Fetcher] = None, days_ahead: int = 10,
     return cards
 
 
+RESULT_BET_TYPES = {'単勝': '単勝', '複勝': '複勝', '枠連': '枠連', '馬連': '馬連', 'ワイド': 'ワイド',
+                    '馬単': '馬単', '3連複': '三連複', '3連単': '三連単'}
+"""結果ページの券種名 → ウェアハウスの券種名。"""
+
+
+def parse_result(html: str) -> Dict:
+    """レース結果ページ（race.netkeiba.com/race/result.html）を読む。
+
+    db.netkeiba に反映されるのは数日後なので、当日の突き合わせにはこちらを使う。
+    確定前は払戻の組み合わせが画像で伏せられ、数字も速報値のことがある。
+    `confirmed` が False なら使わないこと。
+
+    Returns:
+        {'order': [{'rank': 1, 'horse_number': 5, 'popularity': 2, 'odds': 4.7}, ...],
+         'payouts': [{'bet_type': '三連複', 'horse_numbers': [4, 5, 7], 'payout': 14700}, ...],
+         'confirmed': True}
+        rank は 除外・取消・中止 なら None。
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    order = []
+    table = soup.select_one('table.RaceTable01')
+    for tr in (table.select('tr') if table else [])[1:]:
+        tds = tr.find_all('td')
+        if len(tds) < 11:
+            continue
+        order.append({'rank': _try_int(_text(tds[0])), 'horse_number': _try_int(_text(tds[2])),
+                      'horse_name': _text(tds[3]),
+                      'popularity': _try_int(_text(tds[9])), 'odds': _try_float(_text(tds[10]))})
+
+    payouts = []
+    blurred = bool(soup.select('table.Payout_Detail_Table .Bokashi_Img'))
+    for tr in soup.select('table.Payout_Detail_Table tr'):
+        th, res, pay = tr.find('th'), tr.find('td', class_='Result'), tr.find('td', class_='Payout')
+        kind = RESULT_BET_TYPES.get(_text(th)) if th else None
+        if not kind or res is None or pay is None:
+            continue
+        yen = [int(x.replace(',', '')) for x in re.findall(r'([\d,]+)円', pay.get_text(' '))]
+        if res.find('ul'):
+            combos = [[int(sp.get_text(strip=True)) for sp in ul.select('li span') if sp.get_text(strip=True)]
+                      for ul in res.find_all('ul')]
+        else:
+            combos = [[int(sp.get_text(strip=True))] for sp in res.select('span') if sp.get_text(strip=True)]
+        combos = [c for c in combos if c]
+        for c, y in zip(combos, yen):
+            payouts.append({'bet_type': kind, 'horse_numbers': c, 'payout': y})
+    return {'order': order, 'payouts': payouts,
+            'confirmed': bool(order) and bool(payouts) and not blurred}
+
+
+def fetch_result(race_id: str, fetcher: Fetcher) -> Optional[Dict]:
+    """当日のレース結果。確定前や未発表なら None。"""
+    resp = fetcher.get(f'{RACE_HOST}/race/result.html?race_id={race_id}',
+                       referer=f'{RACE_HOST}/top/')
+    if resp is None or resp.status_code != 200:
+        return None
+    got = parse_result(resp.text)
+    return got if got['confirmed'] else None
+
+
 UNRUN = 99
 """まだ走っていない行に入れる着順。
 

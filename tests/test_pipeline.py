@@ -719,6 +719,31 @@ def test_shutuba():
     check('オッズの状態を日本語に', shutuba.ODDS_STATUS.get('final') == '確定')
     check('発売中は前日に限らない', shutuba.ODDS_STATUS.get('middle') == '発売中')
     check('発走後の result も確定', shutuba.ODDS_STATUS.get('result') == '確定')
+    # 当日のレース結果ページ。db.netkeiba に反映される前の突き合わせに使う
+    html = """<table class="RaceTable01"><tr><th>着順</th></tr>
+<tr><td>1</td><td>3</td><td>5</td><td>パンサーズ</td><td>牡3</td><td>56.0</td><td>松若</td>
+<td>1:23.6</td><td></td><td>2</td><td>4.7</td></tr>
+<tr><td>取消</td><td>1</td><td>1</td><td>トリケシ</td><td>牡3</td><td>56.0</td><td>某</td>
+<td></td><td></td><td></td><td></td></tr></table>
+<table class="Payout_Detail_Table">
+<tr><th>複勝</th><td class="Result"><div><span>5</span></div><div><span></span></div><div><span>4</span></div></td>
+<td class="Payout"><span>190円<br>850円</span></td></tr>
+<tr><th>ワイド</th><td class="Result"><ul><li><span>4</span></li><li><span>5</span></li><li></li></ul>
+<ul><li><span>5</span></li><li><span>7</span></li><li></li></ul></td>
+<td class="Payout"><span>3,020円<br>560円</span></td></tr>
+<tr><th>3連複</th><td class="Result"><ul><li><span>4</span></li><li><span>5</span></li><li><span>7</span></li></ul></td>
+<td class="Payout"><span>14,700円</span></td></tr></table>"""
+    res = shutuba.parse_result(html)
+    check('結果の着順を読める', res['order'][0]['horse_number'] == 5 and res['order'][0]['odds'] == 4.7)
+    check('取消は着順なし', res['order'][1]['rank'] is None)
+    pays = {(p['bet_type'], tuple(p['horse_numbers'])): p['payout'] for p in res['payouts']}
+    check('複勝を馬ごとに読める', pays.get(('複勝', (4,))) == 850, f'{pays}')
+    check('ワイドを組ごとに読める', pays.get(('ワイド', (5, 7))) == 560)
+    check('3連複は三連複として読む', pays.get(('三連複', (4, 5, 7))) == 14700)
+    check('確定済みと判定', res['confirmed'])
+    blurred = html.replace('<td class="Result"><ul>', '<td class="Result"><span class="Bokashi_Img"></span><ul>', 1)
+    check('組み合わせが伏せられていれば未確定', not shutuba.parse_result(blurred)['confirmed'])
+
     # init は1時間近く古いことがある。update を先に試す
     check('オッズは update を先に取る', shutuba.ODDS_ACTIONS[0] == 'update')
 

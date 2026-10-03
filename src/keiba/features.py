@@ -360,6 +360,12 @@ def add_added_value(df: pd.DataFrame) -> pd.DataFrame:
     """
     df['added_value_in_race'] = df['is_top3'] - df['horse_expected_top3_rate']
 
+    # まだ走っていない行（出馬表から足したもの）は結果が無いので、
+    # is_top3 が 0 のまま騎手・調教師の平均に混ざってしまう。同じ騎手が
+    # 同じ週末に何鞍も乗ると、先の行が後の行の平均を押し下げる。除外する。
+    if 'is_unrun' in df.columns:
+        df.loc[df['is_unrun'].fillna(False).astype(bool), 'added_value_in_race'] = np.nan
+
     df = df.sort_values(by=['jockey_id', 'race_date'])
     df['jockey_added_value'] = df.groupby('jockey_id')['added_value_in_race'].transform(
         lambda x: x.shift().expanding().mean()).fillna(0.0)

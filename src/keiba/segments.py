@@ -164,6 +164,33 @@ def overvalued(df: pd.DataFrame) -> pd.Series:
     return cond.fillna(False)
 
 
+def thin_record(df: pd.DataFrame) -> pd.Series:
+    """実績が薄い馬。上位3頭にいたらそのレースは買わない。
+
+      デビュー戦の馬（過去走なし）
+      過去1走だけで、それが3着内だった馬
+
+    **欠損のままの値で判定すること。** 0 で埋めた後に `overvalued` を通すと
+    「2走連続3着内」が 0 ≦ 3 で成立し、この2つが勝手に混ざる。
+    以前のバックテストはまさにその状態で、これを明示したのがこの関数。
+    `overvalued(df) | thin_record(df)` は 0埋め後の `overvalued` と全行一致する。
+
+    除外の効果（ステージ4型モデル、確信度で券種を切替）:
+
+                                   2025      2026〜
+      overvalued だけ             88.5%     88.0%
+      ＋デビュー馬                92.4%     90.2%
+      ＋過去1走で3着内            88.7%     89.8%
+      ＋両方（= thin_record）     93.6%     94.7%
+
+    両期間で一貫して効く。デビュー戦の馬は能力が読めず、1走だけの好走は
+    「目立った実績」として市場に買われやすい（overvalued と同じ構図）。
+    """
+    p1 = pd.to_numeric(df.get('p1_fin'), errors='coerce')
+    p2 = pd.to_numeric(df.get('p2_fin'), errors='coerce')
+    return (p1.isna() | (p2.isna() & (p1 <= 3))).fillna(False)
+
+
 def undervalued(df: pd.DataFrame) -> pd.Series:
     """市場が見落としている馬。
 

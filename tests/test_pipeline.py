@@ -424,6 +424,31 @@ def test_recency_features():
     check('適度な間隔＋僅差負け → 見落とし', under[5], str(under))
     check('休み明けは見落としに含めない', not under[4])
 
+    # 実績が薄い馬。欠損のままの値で判定する
+    import numpy as np
+    thin_df = pd.DataFrame({
+        'p1_pop': [np.nan, 3, 3, 3],
+        'p1_fin': [np.nan, 2, 7, 2],       # デビュー / 1走で2着 / 1走で7着 / 2走
+        'p2_fin': [np.nan, np.nan, np.nan, 6],
+        'p1_margin': [np.nan, 0.5, 3.0, 0.5],
+        'days_since_last': [np.nan, 30, 30, 30],
+    })
+    thin = list(sg.thin_record(thin_df))
+    check('デビュー馬は実績が薄い', thin[0])
+    check('1走だけで3着内は実績が薄い', thin[1])
+    check('1走だけでも着外なら対象外', not thin[2])
+    check('2走以上あれば対象外', not thin[3])
+    check('欠損のままなら overvalued はデビュー馬を拾わない',
+          not sg.overvalued(thin_df).iloc[0])
+
+    # 以前のバックテストは 0 埋め後に overvalued を通していた。
+    # overvalued | thin_record がそれと全行一致すること
+    zero = thin_df.fillna(0)
+    explicit = sg.overvalued(thin_df) | sg.thin_record(thin_df)
+    check('明示ルールが 0埋め後の判定と一致',
+          list(explicit) == list(sg.overvalued(zero)),
+          f'{list(explicit)} / {list(sg.overvalued(zero))}')
+
 
 def test_market():
     """市場の見立てを3着内確率に揃える計算。"""
@@ -544,6 +569,10 @@ def test_betting():
     check('混戦は買わない', p3.shape is None and '混戦' in p3.reason, p3.reason)
     p4 = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05], skip=True)
     check('過大評価なら買わない', p4.shape is None, p4.reason)
+    p4b = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05], skip='実績が薄い')
+    check('見送りの理由を渡せる', p4b.shape is None and p4b.reason == '実績が薄い', p4b.reason)
+    p4c = bt.plan_race('R', hn, [.6, .55, .5, .3, .2, .1, .1, .05], skip='')
+    check('空の理由なら買う', p4c.shape is not None, p4c.reason)
     p5 = bt.plan_race('R', hn[:5], [.6, .5, .5, .3, .2])
     check('少頭数は買わない', p5.shape is None, p5.reason)
 
@@ -554,6 +583,24 @@ def test_betting():
               '馬連': {'R': [(next(iter(plan_u.combos)), 800)]}}
     rt = bt.evaluate([plan_t], nested)
     ru = bt.evaluate([plan_u], nested)
+    # 平らな払戻表（三連複のつもり）に他の券種を混ぜたら止める。
+    # 以前ステージ4がこれで馬連を全部外れ扱いにし、回収率14.9%と出ていた
+    try:
+        bt.evaluate([plan_u], {'R': [(next(iter(plan_u.combos)), 800)]})
+        check('平らな払戻表に馬連を渡すと止まる', False)
+    except ValueError:
+        check('平らな払戻表に馬連を渡すと止まる', True)
+
+    pdf = pd.DataFrame({'race_id': ['R', 'R', 'R'],
+                        'bet_type': ['三連複', '馬連', '単勝'],
+                        'horse_numbers': [[1, 2, 3], [1, 2], [1]],
+                        'payout': [5000, 800, 300]})
+    idx2 = bt.payout_index(pdf)
+    check('payout_index は券種ごとに分ける',
+          idx2['馬連']['R'] == [(frozenset([1, 2]), 800)]
+          and idx2['三連複']['R'] == [(frozenset([1, 2, 3]), 5000)])
+    check('payout_index は買わない券種を含めない', '単勝' not in idx2)
+
     check('券種別の払戻表を引き分ける',
           rt['収支'] == 5000 - plan_t.cost and ru['収支'] == 800 - plan_u.cost,
           f"{rt['収支']} / {ru['収支']}")
@@ -595,6 +642,32 @@ def test_strategy_stage_order():
     check('市場ありモデルは市場情報を含む',
           bool(banned & set(stages.STRATEGY_FEATURES)))
 
+    # 買い目用モデルの特徴量。ステージ3・4・5で同じものを使う
+    cols = (stages.STRATEGY_FEATURES + stages.MARKET_FREE_FEATURES
+            + stages.RECENCY_FEATURES + ['unrelated'])
+    f = stages.strategy_feature_list(cols)
+    check('買い目用モデルは速度特徴量を含む', 'r3_time_z' in f)
+    check('買い目用モデルは前走のズレを含む', 'p1_gap' in f)
+    check('買い目用モデルは市場を含む', 'odds' in f)
+    check('関係ない列は入らない', 'unrelated' not in f)
+    check('重複が無い', len(f) == len(set(f)))
+    check('ステージ4が共通定義を使う',
+          'strategy_feature_list(' in src and 'STRATEGY_ROUNDS' in src)
+    check('ステージ4は除外を 0埋めの前に判定する',
+          src.index('thin_record') < src.index('.fillna(0)'))
+
+    # model_input は元の df を書き換えない（除外は欠損のままで判定するため）
+    import numpy as np
+    d = pd.DataFrame({'a': [1.0, np.nan], 'b': [np.inf, 2.0]})
+    x = stages.model_input(d, ['a', 'b'])
+    check('model_input は欠損と無限大を 0 に', x.values.tolist() == [[1.0, 0.0], [0.0, 2.0]])
+    check('model_input は元を書き換えない', pd.isna(d.loc[1, 'a']))
+
+    # ステージ5もバックテストと同じモデル・同じ除外を使う
+    src5 = inspect.getsource(stages.score_upcoming)
+    check('ステージ5は買い目用モデルを使う', 'model_strategy.pkl' in src5)
+    check('ステージ5も実績の薄い馬を除外する', 'thin_record' in src5)
+
 
 def test_shutuba():
     """出馬表の取得。通信せずに検証できる部分のみ。"""
@@ -635,10 +708,69 @@ def test_shutuba():
           shutuba.minutes_to_post({'date': '2026-10-03'}) is None)
 
     check('オッズの状態を日本語に', shutuba.ODDS_STATUS.get('final') == '確定')
+    check('発売中は前日に限らない', shutuba.ODDS_STATUS.get('middle') == '発売中')
+    check('発走後の result も確定', shutuba.ODDS_STATUS.get('result') == '確定')
 
     check('斤量をfloatに', shutuba._try_float('57.0 kg') == 57.0)
     check('Rをintに', shutuba._try_int('11R') == 11)
     check('数字が無ければ None', shutuba._try_int('') is None)
+
+    # 性齢・本賞金・馬体重
+    check('性齢を分解', shutuba._sex_age('牡2') == ('牡', 2))
+    check('セン馬も読める', shutuba._sex_age('セ5') == ('セ', 5))
+    check('空なら None', shutuba._sex_age('') == (None, None))
+    cond = '4回 東京 1日目 サラ系２歳 未勝利 (混)[指] 馬齢 15頭 本賞金:590,240,150,89,59万円'
+    check('1着賞金を取れる', shutuba._first_prize(cond) == 590.0,
+          f'{shutuba._first_prize(cond)}')
+    check('本賞金が無ければ None', shutuba._first_prize('15頭') is None)
+
+    # 出馬表 → results 形式。学習時の特徴量をそのまま作れる形にする
+    card = {'race_id': 'R1', 'date': '2026-10-03', 'race_name': '2歳未勝利',
+            'surface': 'ダ', 'distance': 1600, 'condition': cond,
+            'horses': [{'horse_number': 1, 'horse_name': 'ア', 'horse_id': 'h1',
+                        'jockey_id': 'j1', 'trainer_id': 't1', 'bracket': 1,
+                        'sex_age': '牡2', 'impost': 56.0, 'jockey_name': '丹内',
+                        'horse_weight': 458.0, 'odds': 4.2, 'popularity': 2}]}
+    rows = shutuba.to_result_rows([card])
+    r = rows.iloc[0]
+    check('馬は horse_id で紐付ける', r['horse_id'] == 'h1')
+    check('賞金から level_score を復元', r['level_score'] == 1, f"{r['level_score']}")
+    check('性齢を展開', (r['sex'], r['age']) == ('牡', 2))
+    check('着順は走る前の印', r['finish_position'] == shutuba.UNRUN)
+    check('走後にしか分からない列は空', pd.isna(r['time_seconds']) and pd.isna(r['last_3f']))
+    check('未走行の印が付く', bool(r['is_unrun']))
+
+    # 出馬表の表記をウェアハウスに合わせる。「ダ」のままだと芝ダ特徴量が壊れる
+    for raw, want in [('ダ', 'ダート'), ('芝', '芝'), ('障', '障害')]:
+        got = shutuba.to_result_rows([{**card, 'surface': raw}]).iloc[0]['surface']
+        check(f'芝ダ「{raw}」→「{want}」', got == want, got)
+
+    # 馬体重は発走1時間前まで出ない。前走の値で埋める
+    from keiba import stages
+    hist = pd.DataFrame({'horse_id': ['h1', 'h1', 'h2'],
+                         'race_date': pd.to_datetime(['2026-08-01', '2026-09-01', '2026-09-01']),
+                         'horse_weight': [470.0, 476.0, 500.0]})
+    up = pd.DataFrame({'horse_id': ['h1', 'h2', 'h3'],
+                       'horse_weight': [None, 498.0, None]})
+    filled = stages._fill_weight_from_last_race(up, hist)['horse_weight'].tolist()
+    check('未発表なら直近の前走の馬体重', filled[0] == 476.0, f'{filled}')
+    check('発表済みならそのまま', filled[1] == 498.0)
+    check('前走が無ければ欠損のまま', pd.isna(filled[2]))
+
+    # 着順 99 は is_top3 を立てない。過去の集計を汚さないため
+    from keiba.features import C03_CONFIG, clean, add_horse_features, add_added_value
+    races_df = pd.DataFrame({'race_id': ['R1'], 'race_name': ['2歳未勝利']})
+    c = clean(races_df, rows.assign(odds=4.2), C03_CONFIG)
+    check('未走行の行は is_top3 が立たない', c['is_top3'].iloc[0] == 0)
+
+    # 同じ騎手が同じ日に複数鞍乗っても、未走行の行は平均に混ざらない
+    two = pd.concat([rows, rows.assign(race_id='R2')], ignore_index=True)
+    c2 = clean(pd.DataFrame({'race_id': ['R1', 'R2'], 'race_name': ['a', 'b']}),
+               two, C03_CONFIG)
+    c2 = add_added_value(add_horse_features(c2, C03_CONFIG))
+    check('未走行の行は騎手の平均に入らない',
+          c2['added_value_in_race'].isna().all(),
+          f"{c2['added_value_in_race'].tolist()}")
 
 
 def test_audit():

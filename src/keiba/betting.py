@@ -37,6 +37,7 @@
 
     confidence < 1.4            買わない
     過大評価の馬が上位3頭にいる  買わない（segments.overvalued）
+    実績の薄い馬が上位3頭にいる  買わない（segments.thin_record）
     1.4 <= confidence < 1.55    三連複 3頭BOX（1点）
     confidence >= 1.55          馬連 軸1頭→相手3頭（3点）
 
@@ -50,6 +51,10 @@
 **ただし検証でも100%には届いていない。** 低い帯の三連複1点は
 95%区間が 41〜163 と極端に広く、102% を「黒字のゾーン」と読んではいけない。
 **少数レースの高回収率は信用しないこと。**
+
+採点にはステージ4型の買い目用モデル（models/model_strategy.pkl）を使う。
+単勝オッズだけ、あるいは13特徴量の model_with_odds では回収率が
+79〜80% にとどまり、この数字は出ない。docs/BETTING.md「採点に使うモデル」。
 """
 
 from __future__ import annotations
@@ -185,13 +190,14 @@ SHAPE_HIT_FIRST = (
 
 
 def plan_race(race_id: str, horse_numbers: Sequence[int], scores: Sequence[float],
-              skip: bool = False, min_confidence: float = MIN_CONFIDENCE,
+              skip=False, min_confidence: float = MIN_CONFIDENCE,
               min_runners: int = 8, rules=SHAPE_BY_CONFIDENCE) -> Plan:
     """1レースの買い方を決める。
 
     Args:
         horse_numbers / scores: 同じ並びの馬番と予測確率
-        skip: 買わない理由が外部で判明している場合（過大評価馬が上位にいる等）
+        skip: 買わない理由が外部で判明している場合（過大評価馬が上位にいる等）。
+            文字列を渡すとそれを理由として記録する
         rules: （確信度の下限, 券種, 買い方）の並び。確信度が高い順に書く
     """
     order = [h for _, h in sorted(zip(scores, horse_numbers), reverse=True)]
@@ -201,7 +207,8 @@ def plan_race(race_id: str, horse_numbers: Sequence[int], scores: Sequence[float
     if len(order) < min_runners:
         return Plan(race_id, confidence, None, set(), '少頭数')
     if skip:
-        return Plan(race_id, confidence, None, set(), '過大評価の馬が上位にいる')
+        reason = skip if isinstance(skip, str) else '過大評価の馬が上位にいる'
+        return Plan(race_id, confidence, None, set(), reason)
     if confidence < min_confidence:
         return Plan(race_id, confidence, None, set(), '混戦（確信度が低い）')
 
@@ -212,6 +219,22 @@ def plan_race(race_id: str, horse_numbers: Sequence[int], scores: Sequence[float
                 return Plan(race_id, confidence, name, combos,
                             bet_type=bet_type)
     return Plan(race_id, confidence, None, set(), '買い方を決められない')
+
+
+def payout_index(payouts: pd.DataFrame, bet_types=None) -> Dict[str, Dict]:
+    """払戻テーブルを `evaluate` に渡す形にする。券種 -> race_id -> [(組, 払戻)]。
+
+    券種を混ぜて買うので、必ず券種ごとに分けて持つ。1つの券種だけの
+    平らな辞書を作ると、他の券種の買い目が黙って外れ扱いになる。
+    """
+    bet_types = bet_types or list(LEG)
+    out: Dict[str, Dict] = {b: {} for b in bet_types}
+    sub = payouts[payouts['bet_type'].isin(bet_types)]
+    for b, rid, hn, p in zip(sub['bet_type'], sub['race_id'],
+                             sub['horse_numbers'], sub['payout']):
+        out[b].setdefault(str(rid), []).append(
+            (frozenset(int(x) for x in hn), int(p)))
+    return out
 
 
 def evaluate(plans: Sequence[Plan], payout_index) -> Dict:
@@ -226,6 +249,11 @@ def evaluate(plans: Sequence[Plan], payout_index) -> Dict:
     nested = bool(payout_index) and isinstance(
         next(iter(payout_index.values())), dict)
     bet = [p for p in plans if p.shape]
+    if not nested and any(p.bet_type != '三連複' for p in bet):
+        # 平らな辞書は三連複のものとして扱う（以前の形式）。他の券種を
+        # 混ぜて渡すと全部外れ扱いになり、回収率が桁違いに低く出る
+        raise ValueError('三連複以外の買い目があります。払戻は '
+                         'betting.payout_index() で券種ごとに渡してください')
     cost = sum(p.cost for p in bet)
     returns, hits, payout = [], 0, 0
     for p in bet:

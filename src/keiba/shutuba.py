@@ -42,7 +42,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
@@ -75,7 +75,9 @@ def upcoming_race_days(fetcher: Fetcher, days_ahead: int = 10,
     return [d for d in discovery.race_days(start, end, fetcher) if d >= start]
 
 
-ODDS_STATUS = {'before': '発売前', 'middle': '前日・暫定', 'final': '確定'}
+ODDS_STATUS = {'before': '発売前', 'middle': '発売中', 'final': '確定', 'result': '確定'}
+"""オッズAPI の status。middle は前日・当日を問わず「発売中の途中経過」で、
+発走後は result が返る。"""
 
 
 def fetch_odds(race_id: str, fetcher: Fetcher) -> Dict:
@@ -116,6 +118,21 @@ def _text(node, default: str = '') -> str:
     return node.get_text(' ', strip=True) if node else default
 
 
+def _weight_in(node) -> Optional[float]:
+    """行から馬体重を拾う。当日まで空欄なので、無ければ None。"""
+    m = re.search(r'(\d{3})\s*\(\s*[+-]?\d+\s*\)', _text(node))
+    return float(m.group(1)) if m else None
+
+
+def _id_in(node, kind: str) -> Optional[str]:
+    """行の中の /horse/xxxx/ や /jockey/result/recent/xxxx/ から ID を拾う。"""
+    a = node.find('a', href=re.compile(rf'/{kind}/'))
+    if a is None:
+        return None
+    m = re.search(rf'/{kind}/(?:result/recent/)?(\w+)', a['href'])
+    return m.group(1) if m else None
+
+
 def fetch_race_card(race_id: str, fetcher: Fetcher,
                     with_odds: bool = True) -> Optional[Dict]:
     """1レースの出馬表を取る。"""
@@ -150,9 +167,16 @@ def fetch_race_card(race_id: str, fetcher: Fetcher,
             'bracket': num(0),
             'horse_number': num(1),
             'horse_name': _text(name),
+            # 馬名で過去走を引くと同名馬・表記ゆれで取り違える。
+            # 出馬表には /horse/{id}/ のリンクがあるので、それを使う。
+            'horse_id': _id_in(tr, 'horse'),
+            'jockey_id': _id_in(tr, 'jockey'),
+            'trainer_id': _id_in(tr, 'trainer'),
             'sex_age': _text(tds[4]),
             'impost': _try_float(_text(tds[5])),
             'jockey_name': _text(tds[6]),
+            # 馬体重は当日にならないと出ない。出ていれば使う
+            'horse_weight': _weight_in(tr),
         })
     horses = [h for h in horses if h['horse_number'] and h['horse_name']]
 
@@ -270,6 +294,97 @@ def fetch_weekend(fetcher: Optional[Fetcher] = None, days_ahead: int = 10,
             if on_race is not None:
                 on_race(day, rid, card)
     return cards
+
+
+UNRUN = 99
+"""まだ走っていない行に入れる着順。
+
+`features.clean` は着順のある行だけを残すので、NaN のままだと落とされる。
+かといって 1 や 0 にすると is_win / is_top3 が立ってしまう。99 なら
+どちらも 0 になり、過去の集計を汚さない。出馬表の行はその馬にとって
+最後の行なので、ここから未来へ shift される先も無い。
+"""
+
+
+def _sex_age(text) -> Tuple[Optional[str], Optional[int]]:
+    """「牡2」→ ('牡', 2)。"""
+    m = re.match(r'([牡牝セ])\s*(\d+)', str(text or ''))
+    return (m.group(1), int(m.group(2))) if m else (None, None)
+
+
+def _first_prize(condition: str) -> Optional[float]:
+    """条件欄の「本賞金:590,240,150,89,59万円」から1着賞金（万円）を取る。
+
+    level_score は本来レース後の賞金から決まるが、出馬表にも載っている。
+    クラス名から推定する必要はない。
+    """
+    m = re.search(r'本賞金[:：]\s*([\d,]+)', str(condition or ''))
+    if not m:
+        return None
+    return float(m.group(1).split(',')[0])
+
+
+SURFACE_TO_WAREHOUSE = {'芝': '芝', 'ダ': 'ダート', '障': '障害'}
+"""出馬表の芝ダ表記 → ウェアハウスの表記。
+
+出馬表は「ダ」、ウェアハウスは「ダート」。そのままだと `surface_map` に
+当たらず、ダート戦の芝ダ特徴量がすべて欠損扱いになる。
+障害は「障害」にしておけば `features.clean` が落とす（モデルは障害戦を
+学習していない）。
+"""
+
+
+def to_result_rows(cards: List[Dict]) -> 'pandas.DataFrame':
+    """出馬表を results と同じ形の行に直す。
+
+    学習時の特徴量は shift()/expanding() で**過去走だけ**から作られる。
+    だからこの行を results の末尾に足して `features.build_features` を
+    通せば、そのまま予測用の特徴量になる。馬の紐付けは horse_id なので
+    同名馬で取り違えることもない。
+
+    走ってみないと分からない列（タイム・上がり・着差）は None のまま。
+    馬体重は当日になれば出馬表に出るので、出ていれば使う。
+    """
+    import pandas as pd
+    from .parse import classify_race_level
+
+    rows = []
+    for card in cards:
+        prize = _first_prize(card.get('condition'))
+        level = classify_race_level(prize)[1] if prize is not None else None
+        for h in card.get('horses', []):
+            sex, age = _sex_age(h.get('sex_age'))
+            rows.append({
+                'race_id': card['race_id'],
+                'race_date': card.get('date'),
+                'race_name': card.get('race_name'),
+                'horse_id': h.get('horse_id'),
+                'horse_name': h.get('horse_name'),
+                'horse_number': h.get('horse_number'),
+                'gate_number': h.get('bracket'),
+                'jockey_id': h.get('jockey_id'),
+                'jockey_name': h.get('jockey_name'),
+                'trainer_id': h.get('trainer_id'),
+                'surface': SURFACE_TO_WAREHOUSE.get(card.get('surface'),
+                                                    card.get('surface')),
+                'distance': card.get('distance'),
+                'level_score': level,
+                'impost': h.get('impost'),
+                'horse_weight': h.get('horse_weight'),
+                'odds': h.get('odds'),
+                'popularity': h.get('popularity'),
+                'sex': sex,
+                'age': age,
+                'finish_position': UNRUN,
+                'is_finished': True,
+                'is_unrun': True,
+                'time_seconds': None,
+                'last_3f': None,
+                'margin': None,
+                'weight_change': None,
+                'prize_money': 0.0,
+            })
+    return pd.DataFrame(rows)
 
 
 def to_json(cards: List[Dict], indent: int = 1) -> str:

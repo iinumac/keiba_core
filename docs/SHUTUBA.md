@@ -77,11 +77,12 @@ cards = shutuba.fetch_weekend(f, days_ahead=10)
 
 ```python
 card['odds_updated_at']   # '2026-10-02 23:42:16'
-card['odds_status']       # '発売前' / '前日・暫定' / '確定'
+card['odds_status']       # '発売前' / '発売中' / '確定'
 ```
 
 直前に何度も回すなら [`05_predict`](../notebooks/05_predict.ipynb) を使う。
-生HTMLを取得せず（62MB）、ウェアハウスも学習済みモデルも使わないので起動が速い。
+生HTMLを取得しないので（62MB）起動が速い。ウェアハウスと学習済みモデルは
+リポジトリにあるものを使う。採点は1回目に60秒ほど、2回目以降は一瞬。
 `within_minutes` で発走が近いレースだけに絞れる。
 
 ```python
@@ -102,7 +103,9 @@ stages.predict(race_ids=[...])      # レースを指定して取り直し
   'odds_available': True,
   'horses': [
     {'bracket': 1, 'horse_number': 1, 'horse_name': 'ルヴァレドクール',
+     'horse_id': '2022105123', 'jockey_id': '01091', 'trainer_id': '01141',
      'sex_age': 'セ4', 'impost': 57.0, 'jockey_name': '横山和',
+     'horse_weight': 482.0,           # 当日まで None
      'odds': 9.1, 'popularity': 5},
     ...
   ]
@@ -110,3 +113,23 @@ stages.predict(race_ids=[...])      # レースを指定して取り直し
 ```
 
 `shutuba.to_json(cards)` でJSON文字列になる。
+
+## 過去走との紐付け
+
+馬名で引くと同名馬や表記ゆれで取り違えるので、出馬表の
+`/horse/{id}/` リンクから `horse_id` を取る。騎手・調教師も同じ。
+
+`shutuba.to_result_rows(cards)` で results と同じ形の行に直せる。
+これを results の末尾に足して `features.build_features` を通せば、
+学習時と同じ特徴量になる（特徴量は過去走だけから作られるため）。
+
+| 列 | 出馬表での扱い |
+|---|---|
+| `level_score` | 条件欄の「本賞金:590,…万円」から復元。推定ではなく正確 |
+| `horse_weight` | 当日になれば出る。前日は None |
+| `finish_position` | `UNRUN`（99）。is_top3 を立てず、過去の集計を汚さない |
+| `is_unrun` | True。騎手・調教師の平均にこの行を入れないための印 |
+| タイム・上がり・着差 | None（走ってみないと分からない） |
+
+通常のバッチ計算と比べて、最終開催日24レースで最大差 0.002、
+レース内の順位は全レースで一致した。

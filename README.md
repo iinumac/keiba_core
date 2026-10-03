@@ -43,9 +43,9 @@ df = pd.read_parquet('data/warehouse/results/year=2025/part.parquet')
 | [`00_run`](notebooks/00_run.ipynb) | **1〜5 を範囲指定してまとめて実行。通常はこれだけ使う** | — |
 | [`01_collect`](notebooks/01_collect.ipynb) | 1. 取り込み — 新しいレースを検知して HTML を取得 | `data/html/YYYY/*.html` |
 | [`02_build`](notebooks/02_build.ipynb) | 2. パース — 増えた分だけウェアハウスへ | `data/warehouse/` |
-| [`03_train`](notebooks/03_train.ipynb) | 3. 学習 — 3着内確率モデルとマスタ | `models/`, `data/master/` |
+| [`03_train`](notebooks/03_train.ipynb) | 3. 学習 — 3着内確率モデル・**買い目用モデル**（`model_strategy.pkl`）とマスタ | `models/`, `data/master/` |
 | [`04_strategy`](notebooks/04_strategy.ipynb) | 4. 戦略評価 — 買い方の検証 | 画面出力 |
-| [`05_predict`](notebooks/05_predict.ipynb) | 5. 予想 — **発走直前に何度でも回す用**。軽量・単独で動く | `data/shutuba/` |
+| [`05_predict`](notebooks/05_predict.ipynb) | 5. 予想 — **発走直前に何度でも回す用**。生HTML不要。買い目用モデルで採点（2回目以降は一瞬） | `data/shutuba/` |
 | [`90_analysis`](notebooks/90_analysis.ipynb) | 分析 — SQL による自由分析（独立） | — |
 
 01〜04 が一本のパイプライン、90 はそれを横から覗く道具。

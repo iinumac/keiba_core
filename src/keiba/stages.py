@@ -102,6 +102,35 @@ STRATEGY_FEATURES = [
 ]
 
 
+STRATEGY_PARAMS = {'objective': 'binary', 'metric': 'auc', 'learning_rate': 0.05,
+                   'num_leaves': 63, 'verbose': -1, 'seed': 42}
+STRATEGY_ROUNDS = 600
+"""買い目用モデルの学習条件。ステージ3（保存）とステージ4（評価）で共有する。"""
+
+
+def strategy_feature_list(columns) -> List[str]:
+    """買い目用モデルの特徴量。市場あり＋市場なし＋前走のズレ。
+
+    ステージ3の model_with_odds（13特徴量）では、買い目に使うと回収率が
+    80% にとどまり、単勝オッズだけ（79%）と変わらなかった。タイム偏差や
+    前走のズレまで入れたこの構成で 93〜95% になる。
+    """
+    cols = set(columns)
+    return [c for c in dict.fromkeys(STRATEGY_FEATURES + MARKET_FREE_FEATURES
+                                     + RECENCY_FEATURES) if c in cols]
+
+
+def model_input(df: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+    """モデルに渡す形に整える。数値化し、無限大と欠損を 0 にする。
+
+    元の df は書き換えない。除外の判定（segments.thin_record など）は
+    欠損のままの値で行う必要があるため。
+    """
+    import numpy as np
+    return (df[features].apply(pd.to_numeric, errors='coerce')
+            .replace([np.inf, -np.inf], np.nan).fillna(0))
+
+
 def _rule(title: str) -> None:
     print(f'\n{"=" * 60}\n{title}\n{"=" * 60}', flush=True)
 
@@ -329,6 +358,24 @@ def train(push: bool = True) -> Dict:
         with open(config.MODEL_DIR / f'{name}.pkl', 'wb') as f:
             pickle.dump(m, f)
 
+    # 買い目用のモデル。ステージ4【1】と同じ作りで、ステージ5はこれで採点する。
+    # 上の2つは特徴量が少なく、買い目に使うと回収率が市場だけと変わらない
+    from .features import C04_CONFIG
+    df4 = build_features(races, results, C04_CONFIG)
+    f_strat = strategy_feature_list(df4.columns)
+    X4 = model_input(df4, f_strat)
+    is_tr = (df4['year'] <= TRAIN_END_YEAR).to_numpy()
+    m4 = lgb.train(STRATEGY_PARAMS, lgb.Dataset(X4[is_tr], df4.loc[is_tr, 'is_top3']),
+                   num_boost_round=STRATEGY_ROUNDS)
+    aucs['model_strategy'] = roc_auc_score(df4.loc[~is_tr, 'is_top3'],
+                                           m4.predict(X4[~is_tr]))
+    print(f"  model_strategy: テストAUC {aucs['model_strategy']:.4f}"
+          f'（買い目用。{len(f_strat)}特徴量。ステージ5が使う）')
+    with open(config.MODEL_DIR / 'model_strategy.pkl', 'wb') as f:
+        pickle.dump({'model': m4, 'features': f_strat, 'config': 'C04',
+                     'train_end_year': TRAIN_END_YEAR}, f)
+    del df4, X4
+
     # 最新評価値のスナップショット。同一日に複数レースがある場合に拾う行が
     # 定まるよう race_id まで含めて並べる（旧実装は行順依存だった）。
     order = ['race_date', 'race_id'] if 'race_date' in df.columns else ['date', 'race_id']
@@ -398,11 +445,14 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
     payouts['race_id'] = payouts['race_id'].astype(str)
     df['race_id'] = df['race_id'].astype(str)
 
-    market = [c for c in STRATEGY_FEATURES if c in df.columns]
-    free = [c for c in MARKET_FREE_FEATURES if c in df.columns]
-    recency = [c for c in RECENCY_FEATURES if c in df.columns]
-    f_market = list(dict.fromkeys(market + free + recency))
-    f_free = list(dict.fromkeys(free))
+    f_market = strategy_feature_list(df.columns)
+    f_free = [c for c in dict.fromkeys(MARKET_FREE_FEATURES) if c in df.columns]
+
+    # 除外の判定は欠損のままの値で行う。0 で埋めた後だと、過去走の無い馬が
+    # 「2走連続3着内」（0 ≦ 3）に当たってしまう。以前はその偶然で除外が
+    # 効いていたので、同じ結果になるよう thin_record として明示してある
+    df['_over'] = sg.overvalued(df)
+    df['_thin'] = sg.thin_record(df)
 
     for c in set(f_market + f_free):
         df[c] = pd.to_numeric(df[c], errors='coerce').replace(
@@ -410,13 +460,12 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
     tr = df[df['year'] <= train_end_year]
     te = df[df['year'] > train_end_year].copy()
 
-    params = {'objective': 'binary', 'metric': 'auc', 'learning_rate': 0.05,
-              'num_leaves': 63, 'verbose': -1, 'seed': 42}
+    params = STRATEGY_PARAMS
 
     # ---------------- 1. 候補のスコアリング ----------------
     print('【1】候補のスコアリング（市場ありモデル）— 的中率で測る')
     m_market = lgb.train(params, lgb.Dataset(tr[f_market], tr['is_top3']),
-                         num_boost_round=600)
+                         num_boost_round=STRATEGY_ROUNDS)
     te['score'] = m_market.predict(te[f_market])
     auc = roc_auc_score(te['is_top3'], te['score'])
     print(f'  AUC {auc:.4f}   学習 {len(tr):,} / 検証 {len(te):,} 行')
@@ -436,7 +485,7 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
     # ---------------- 2. 市場と独立した見方 ----------------
     print('\n【2】市場と独立した見方との突き合わせ（市場なしモデル）— 回収率で測る')
     m_free = lgb.train(params, lgb.Dataset(tr[f_free], tr['is_top3']),
-                       num_boost_round=600)
+                       num_boost_round=STRATEGY_ROUNDS)
     te['score_free'] = m_free.predict(te[f_free])
     print(f'  AUC {roc_auc_score(te["is_top3"], te["score_free"]):.4f}'
           f'（市場ありより低いのは当然。絞り込みには使わない）')
@@ -455,19 +504,24 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
     # ---------------- 3. 除外と買い方 ----------------
     print('\n【3】除外と買い方 — 回収率と参加率で測る')
     ranked = te.sort_values('score', ascending=False)
-    ranked['_over'] = sg.overvalued(ranked)
-    skip = set(ranked.groupby('race_id').head(3)
-               .groupby('race_id')['_over'].sum().pipe(lambda x: x[x > 0]).index)
-    print(f'  上位3頭に過大評価の馬がいるレース: {len(skip):,}')
+    ranked['_exclude'] = ranked['_over'] | ranked['_thin']
+    top3 = ranked.groupby('race_id').head(3).groupby('race_id')
+    skip = set(top3['_exclude'].sum().pipe(lambda x: x[x > 0]).index)
+    any_over = top3['_over'].sum() > 0
+    any_thin = top3['_thin'].sum() > 0
+    n_over, n_thin = int(any_over.sum()), int(any_thin.sum())
+    # 見送りの理由はステージ5と同じ書き方にする（過大評価を優先）
+    reason = {rid: '過大評価の馬が上位にいる' for rid in any_over[any_over].index}
+    for rid in any_thin[any_thin].index:
+        reason.setdefault(rid, '実績の薄い馬が上位にいる（デビュー馬・1走のみ）')
+    print(f'  上位3頭に除外対象の馬がいるレース: {len(skip):,}'
+          f'（過大評価 {n_over:,} / 実績が薄い {n_thin:,}、重複あり）')
 
-    tri = payouts[payouts['bet_type'] == '三連複']
-    idx: Dict[str, list] = {}
-    for rid, hn, p in zip(tri['race_id'], tri['horse_numbers'], tri['payout']):
-        idx.setdefault(str(rid), []).append(
-            (frozenset(int(x) for x in hn), int(p)))
+    # 券種を混ぜて買うので、払戻も券種ごとに引く
+    idx = betting.payout_index(payouts)
 
     plans = [betting.plan_race(rid, g['horse_number'].astype(int).tolist(),
-                               g['score'].tolist(), skip=rid in skip)
+                               g['score'].tolist(), skip=reason.get(rid, ''))
              for rid, g in te.groupby('race_id')]
     result = betting.evaluate(plans, idx)
     print(pd.DataFrame([result]).to_string(index=False))
@@ -476,7 +530,7 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
     if len(reasons):
         print('\n  買わなかった理由:')
         print('    ' + reasons.to_string().replace('\n', '\n    '))
-    shapes = pd.Series([p.shape for p in plans if p.shape]).value_counts()
+    shapes = pd.Series([f'{p.bet_type} {p.shape}' for p in plans if p.shape]).value_counts()
     if len(shapes):
         print('\n  選ばれた買い方:')
         print('    ' + shapes.to_string().replace('\n', '\n    '))
@@ -493,6 +547,138 @@ def strategy(push: bool = False, train_end_year: int = TRAIN_END_YEAR) -> Dict:
 
 # ---------------------------------------------------------------------------
 # 5. 予想（今週末）
+# ---------------------------------------------------------------------------
+_UPCOMING_CACHE: Dict[str, 'pd.DataFrame'] = {}
+"""race_id ごとの特徴量の控え。2回目以降の採点を速くする。
+
+`FEATURES_WITH_ODDS` のうちオッズで変わるのは odds と popularity だけで、
+残りは過去走から決まる。発走直前に何度も回すとき、重い部分（全履歴の
+特徴量計算、60秒ほど）をやり直す必要はない。
+
+レース単位で持つのは、「発走まで90分以内」で絞ると時間とともに対象の
+組み合わせが変わるため。計算の重さは対象レース数にほぼよらない
+（全履歴を通す部分が支配的）ので、初回に当日の全レースを入れておく。
+"""
+
+
+def _fill_weight_from_last_race(rows: pd.DataFrame,
+                                results: pd.DataFrame) -> pd.DataFrame:
+    """未発表の馬体重を前走の馬体重で埋める。
+
+    馬体重は発走の約1時間前にならないと出馬表に出ない。欠損のままだと
+    特徴量の作成で 0 に埋まるが、学習データに 0 は1件も無い（レース後は
+    必ず分かる）。前走の値ならほぼ同じ水準になる。発表されたら
+    `score_upcoming` が差し替える。
+    """
+    known = pd.to_numeric(results['horse_weight'], errors='coerce')
+    last = (results.assign(_w=known).dropna(subset=['_w'])
+            .sort_values('race_date').groupby('horse_id')['_w'].last())
+    w = pd.to_numeric(rows['horse_weight'], errors='coerce')
+    return rows.assign(horse_weight=w.fillna(rows['horse_id'].map(last)))
+
+
+def score_upcoming(cards: List[Dict], use_cache: bool = True,
+                    warm: Optional[List[Dict]] = None) -> Dict[str, Dict]:
+    """出馬表に 3着内確率のスコアを付け、買わないレースを判定する。
+
+    ステージ4のバックテストと**同じモデル・同じ除外**を使う:
+
+      モデル  model_strategy.pkl（ステージ3が保存。ステージ4【1】と同じ作り）
+      除外    上位3頭に overvalued または thin_record の馬がいれば買わない
+
+    出馬表の行を results の末尾に足して `build_features` を通す。学習時の
+    特徴量は shift()/expanding() で過去走だけから作られるので、これだけで
+    予測用の特徴量になる。馬の紐付けは horse_id なので同名馬で取り違えない。
+    この方式が通常のバッチ計算と一致することは実測で確認してある。
+
+    新馬戦は全頭がデビュー馬なので、thin_record で必ず見送りになる。
+
+    Args:
+        cards: 採点したい出馬表（オッズ入り）
+        use_cache: False なら控えを使わず計算し直す
+        warm: 一緒に特徴量を作っておく出馬表（オッズ不要）。
+            次に呼ばれたとき、ここに含まれるレースは計算が要らない。
+
+    Returns:
+        race_id -> {'horse_number': [...], 'score': [...], 'skip': str}
+        skip は買わない理由（買うなら空文字）。
+    """
+    import pickle
+    from . import config, store, segments, shutuba
+    from .features import build_features, C04_CONFIG
+
+    path = config.MODEL_DIR / 'model_strategy.pkl'
+    if not path.exists():
+        # 市場オッズで代用すると回収率が控除率そのまま（79%）になるので、
+        # 黙って代用せず止める
+        raise FileNotFoundError(
+            f'{path} がありません。先にステージ3（学習）を回してください。')
+    with open(path, 'rb') as f:
+        bundle = pickle.load(f)
+
+    if not use_cache:
+        _UPCOMING_CACHE.clear()
+    want = {str(c['race_id']) for c in cards}
+    pool = {str(c['race_id']): c for c in (warm or [])}
+    pool.update({str(c['race_id']): c for c in cards})
+    todo = [c for rid, c in pool.items() if rid not in _UPCOMING_CACHE]
+
+    if todo and want - set(_UPCOMING_CACHE):
+        rows = shutuba.to_result_rows(todo)
+        if not rows.empty:
+            races, results = store.load_for_features()
+            rows = _fill_weight_from_last_race(rows, results)
+            df = build_features(races, pd.concat([results, rows], ignore_index=True),
+                                C04_CONFIG)
+            new = df[df['race_id'].astype(str).isin(rows['race_id'].astype(str))].copy()
+            # 除外の判定は過去走だけで決まる。欠損のままの値で一度だけ出す
+            new['_over'] = segments.overvalued(new)
+            new['_thin'] = segments.thin_record(new)
+            for rid in rows['race_id'].astype(str).unique():
+                _UPCOMING_CACHE[rid] = new[new['race_id'].astype(str) == rid]
+
+    parts = [_UPCOMING_CACHE[r] for r in want if r in _UPCOMING_CACHE]
+    up = pd.concat(parts) if parts else pd.DataFrame()
+    if up.empty:
+        return {}
+
+    # オッズは発走まで動く。毎回入れ直し、オッズ由来の特徴量も作り直す。
+    # 馬体重も発走の約1時間前に発表されるので、出ていれば差し替える
+    fresh = {(str(c['race_id']), h.get('horse_number')): h
+             for c in cards for h in c.get('horses', [])}
+    pairs = list(zip(up['race_id'].astype(str), up['horse_number']))
+    announced = pd.to_numeric(pd.Series(
+        [fresh.get(k, {}).get('horse_weight') for k in pairs], index=up.index),
+        errors='coerce')
+    up = up.assign(horse_weight=announced.fillna(up['horse_weight']))
+    up = up.assign(
+        odds=pd.to_numeric(pd.Series([fresh.get(k, {}).get('odds') for k in pairs],
+                                     index=up.index), errors='coerce'),
+        popularity=pd.to_numeric(pd.Series([fresh.get(k, {}).get('popularity') for k in pairs],
+                                           index=up.index), errors='coerce'))
+    up = up[up['odds'].notna() & (up['odds'] > 0)]
+    if up.empty:
+        return {}
+    from .features import add_market_features
+    up = add_market_features(up.copy(), C04_CONFIG)
+
+    up = up.assign(score=bundle['model'].predict(model_input(up, bundle['features'])))
+
+    out = {}
+    for rid, g in up.groupby('race_id'):
+        g = g.sort_values('score', ascending=False)
+        top = g.head(3)
+        skip = ('過大評価の馬が上位にいる' if top['_over'].any()
+                else '実績の薄い馬が上位にいる（デビュー馬・1走のみ）' if top['_thin'].any()
+                else '')
+        out[str(rid)] = {
+            'horse_number': g['horse_number'].astype(int).tolist(),
+            'score': g['score'].to_numpy(float),
+            'skip': skip,
+        }
+    return out
+
+
 # ---------------------------------------------------------------------------
 def predict(push: bool = False, days_ahead: int = 10,
             save_json: bool = True, within_minutes: Optional[int] = None,
@@ -511,13 +697,17 @@ def predict(push: bool = False, days_ahead: int = 10,
         race_ids: レースを直接指定する。オッズだけ取り直したいときに使う。
         days_ahead: 何日先まで見るか。
 
-    この段はウェアハウスも学習済みモデルも使わないので、単独で何度でも回せる。
+    スコアはステージ3の学習済みモデル（model_with_odds）で出し、
+    上位3頭に過大評価の馬がいるレースは買わない。バックテストと同じ方式。
 
-    **ただし、だからこそモデルの上乗せは効いていない。** スコアは単勝オッズ
-    由来の市場確率（Harville）だけで、市場のコンセンサスをなぞっている。
-    学習済みモデルを効かせるには、出馬表の馬名から過去走を引く仕組みが要る。
-    新馬は過去走が1走も無いため、仕組みを足しても市場以上にはならない
-    （市場なしモデルの AUC は新馬で 0.61 とほぼランダム）。
+    **市場オッズだけで代用してはいけない。** 単勝オッズ → Harville で
+    スコアを作ると、履歴データで購入率90%・回収率79.0%（控除率そのまま）。
+    閾値を上げても 85.1% が頭打ちだった。
+
+    1回目は全履歴から特徴量を作るので60秒ほどかかる。2回目以降は
+    オッズを入れ直すだけなので一瞬で終わる（`_UPCOMING_CACHE`）。
+
+    新馬は学習対象外（過去走が無い）なので買わない。
     """
     import pickle
     from . import betting, config, fetch, shutuba
@@ -525,6 +715,12 @@ def predict(push: bool = False, days_ahead: int = 10,
     _rule(STAGE_LABELS['predict'])
 
     fetcher = fetch.Fetcher()
+
+    # race_id を指定して取り直すとき、出馬表には開催日が載っていない。
+    # 1回目の絞り込みで分かった日付を覚えておき、2回目の card に書き戻す。
+    # これが無いと minutes_to_post が None を返し、発走までの分数が出ない。
+    race_days: Dict[str, str] = {}
+    all_cards: List[Dict] = []     # 絞り込み前の全レース。採点の控えを作るのに使う
 
     if race_ids is None:
         days = shutuba.upcoming_race_days(fetcher, days_ahead=days_ahead)
@@ -543,6 +739,8 @@ def predict(push: bool = False, days_ahead: int = 10,
                     if not card:
                         continue
                     card['date'] = day.isoformat()
+                    race_days[rid] = card['date']
+                    all_cards.append(card)
                     left = shutuba.minutes_to_post(card)
                     if left is not None and 0 <= left <= within_minutes:
                         race_ids.append(rid)
@@ -553,11 +751,19 @@ def predict(push: bool = False, days_ahead: int = 10,
 
     def on_race(day, race_id, card):
         if card:
+            if not card.get('date'):
+                card['date'] = race_days.get(race_id, '')
             mark = '○' if card.get('odds_available') else '×'
+            hs = card.get('horses', [])
+            # 馬体重は発走の約1時間前に出る。未発表なら前走の値で代用するが、
+            # 履歴で測ると回収率が約2pt下がる（93.6% → 91.0%）
+            w = sum(1 for h in hs if h.get('horse_weight'))
+            wmark = '○' if hs and w == len(hs) else ('×' if w == 0 else '△')
             left = shutuba.minutes_to_post(card)
             when = f'発走まで{left:>4}分' if left is not None else ''
             print(f'    {card["venue_name"]} {card["race_num"]:>2}R '
-                  f'{(card["race_name"] or "")[:16]:18s} オッズ{mark} {when}', flush=True)
+                  f'{(card["race_name"] or "")[:16]:18s} オッズ{mark} 馬体重{wmark} {when}',
+                  flush=True)
 
     cards = shutuba.fetch_weekend(fetcher, days_ahead=days_ahead,
                                   on_race=on_race, race_ids=race_ids)
@@ -570,7 +776,8 @@ def predict(push: bool = False, days_ahead: int = 10,
     if save_json and cards:
         out = config.DATA_DIR / 'shutuba'
         out.mkdir(parents=True, exist_ok=True)
-        path = out / f'{cards[0]["date"]}_weekend.json'
+        day = cards[0].get('date') or dt.date.today().isoformat()
+        path = out / f'{day}_weekend.json'
         path.write_text(shutuba.to_json(cards), encoding='utf-8')
         print(f'  保存: {path}')
 
@@ -578,16 +785,23 @@ def predict(push: bool = False, days_ahead: int = 10,
     #
     # スコアは「3着内確率」でなければならない。確信度の閾値（1.4）は
     # 上位3頭の3着内確率の合計で較正してある。1/オッズ をそのまま使うと
-    # 尺度が違い（全馬の合計が約1.25）、常に閾値を下回って全レース見送りになる。
+    # 尺度が違い（全馬の合計が約1.25）、常に閾値を下回ってしまう。
     #
-    # 学習済みモデルは過去実績（前走着順・タイム偏差など）を必要とするが、
-    # 出馬表には入っていない。馬名から過去走を引く仕組みが要るため、
-    # それが無い間は市場（単勝オッズ → Harville）を唯一の情報源とする。
-    # つまりこの段は**市場のコンセンサスに乗っているだけで、モデルの
-    # 上乗せは効いていない**。新馬は特にそうで、過去走が1走も無いため
-    # 市場なしモデルの AUC は 0.61（ほぼランダム）しかない。
-    import numpy as np
-    from . import market
+    # **市場オッズだけでは戦略にならない。** 単勝オッズ → Harville で
+    # スコアを作ると、履歴データで購入率90%・回収率79.0%、ほぼ控除率
+    # そのままだった。閾値を 1.8 まで上げても 85.1% が頭打ちで、
+    # 市場だけで市場に勝つことはできない。バックテストの 94.1% は
+    # 「学習済みモデルのスコア」と「過大評価の除外」の両方があって
+    # 成立する数字なので、ここでも同じものを使う。
+    #
+    # 学習時の特徴量は shift()/expanding() で過去走だけから作られるので、
+    # 出馬表を results の末尾に足して build_features を通せば、そのまま
+    # 予測用の特徴量になる（馬の紐付けは horse_id）。
+    t0 = dt.datetime.now()
+    scored = score_upcoming(cards, warm=all_cards)
+    took = (dt.datetime.now() - t0).total_seconds()
+    print(f'  採点 {len(scored)} レース（{took:.0f}秒'
+          + ('。2回目以降はオッズの入れ直しだけで済みます' if took > 5 else '') + '）')
 
     plans = []
     no_odds_races = 0
@@ -596,11 +810,16 @@ def predict(push: bool = False, days_ahead: int = 10,
         if len(hs) < 3:
             no_odds_races += 1
             continue
-        win = market.implied_win_prob(np.array([h['odds'] for h in hs], dtype=float))
-        top3 = market.harville_top3(win)
-        plan = betting.plan_race(card['race_id'],
-                                 [h['horse_number'] for h in hs], list(top3))
-        plans.append((card, plan))
+        g = scored.get(str(card['race_id']))
+        if g is None:
+            # モデルで出せなかったレースは買わない。市場だけで代用すると
+            # 人気馬をなぞるだけになり、控除率ぶん負ける
+            plans.append((card, betting.Plan(
+                race_id=card['race_id'], confidence=0.0, shape=None, combos=set(),
+                reason='モデルでスコアを出せない')))
+            continue
+        plans.append((card, betting.plan_race(
+            card['race_id'], g['horse_number'], g['score'], skip=g['skip'])))
 
     plans.sort(key=lambda cp: shutuba.minutes_to_post(cp[0]) or 99999)
 

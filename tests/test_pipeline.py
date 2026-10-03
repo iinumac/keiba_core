@@ -503,36 +503,65 @@ def test_betting():
     from keiba import betting as bt
 
     order = [5, 3, 9, 1, 7, 2, 11]
-    for name, want in [('3頭BOX', 1), ('軸2頭→相手3頭', 3), ('4頭BOX', 4),
-                       ('軸2頭→相手5頭', 5), ('軸1頭→相手4頭', 6),
-                       ('軸1頭→相手5頭', 10), ('5頭BOX', 10)]:
-        got = len(bt.SHAPES[name](order))
-        check(f'{name} = {want}点', got == want, f'{got}')
+    for bet, name, want in [
+            ('三連複', '3頭BOX', 1), ('三連複', '軸2頭→相手3頭', 3),
+            ('三連複', '4頭BOX', 4), ('三連複', '軸1頭→相手4頭', 6),
+            ('三連複', '5頭BOX', 10),
+            # ワイドと馬連は2頭組なので、同じ相手数でも点数が少ない
+            ('ワイド', '軸1頭→相手2頭', 2), ('ワイド', '軸1頭→相手3頭', 3),
+            ('ワイド', '4頭BOX', 6),
+            ('馬連', '軸1頭→相手2頭', 2), ('馬連', '軸1頭→相手3頭', 3)]:
+        got = len(bt.SHAPES[bet][name](order))
+        check(f'{bet} {name} = {want}点', got == want, f'{got}')
     check('どの買い方も上限10点以内',
-          all(len(f(order)) <= bt.MAX_POINTS for f in bt.SHAPES.values()))
+          all(len(f(order)) <= bt.MAX_POINTS
+              for shapes in bt.SHAPES.values() for f in shapes.values()))
+    check('2頭組の券種は3頭流しが3点',
+          len(bt.SHAPES['ワイド']['軸1頭→相手3頭'](order))
+          < len(bt.SHAPES['三連複']['軸1頭→相手4頭'](order)))
 
-    # 軸2頭流しは軸2頭を必ず含む
-    combos = bt.SHAPES['軸2頭→相手3頭'](order)
-    check('軸2頭流しは軸を必ず含む',
-          all({order[0], order[1]} <= c for c in combos))
+    # 軸流しは軸を必ず含む
+    combos = bt.SHAPES['馬連']['軸1頭→相手3頭'](order)
+    check('馬連の軸流しは軸を必ず含む', all(order[0] in c for c in combos))
+    check('馬連は2頭組', all(len(c) == 2 for c in combos))
 
     hn = [5, 3, 9, 1, 7, 2, 11, 4]
-    # 堅いレースは点数を絞る
-    p = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05])
-    check('堅いレースは少点数', p.shape == '軸2頭→相手3頭', str(p.shape))
+    # 確信度が高いと馬連、低いと三連複1点
+    p = bt.plan_race('R', hn, [.6, .55, .5, .3, .2, .1, .1, .05])
+    check('確信度が高いと馬連', p.bet_type == '馬連', f'{p.bet_type} {p.shape}')
+    p1 = bt.plan_race('R', hn, [.5, .48, .45, .3, .2, .1, .1, .05])
+    check('確信度が低いと三連複1点',
+          p1.bet_type == '三連複' and p1.points == 1,
+          f'{p1.bet_type} {p1.shape} {p1.points}点')
+    # 券種を固定することもできる
+    p2 = bt.plan_race('R', hn, [.6, .55, .5, .3, .2, .1, .1, .05],
+                      rules=((1.4, 'ワイド', '軸1頭→相手3頭'),))
+    check('券種を固定できる', p2.bet_type == 'ワイド' and p2.points == 3,
+          f'{p2.bet_type} {p2.points}点')
+
     # 混戦は買わない。点数を増やすのではない
-    p2 = bt.plan_race('R', hn, [.2, .2, .2, .2, .2, .1, .1, .05])
-    check('混戦は買わない', p2.shape is None and '混戦' in p2.reason, p2.reason)
-    # 外部から「買わない」を渡せる
-    p3 = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05], skip=True)
-    check('過大評価なら買わない', p3.shape is None, p3.reason)
-    # 少頭数も買わない
-    p4 = bt.plan_race('R', hn[:5], [.6, .5, .5, .3, .2])
-    check('少頭数は買わない', p4.shape is None, p4.reason)
+    p3 = bt.plan_race('R', hn, [.2, .2, .2, .2, .2, .1, .1, .05])
+    check('混戦は買わない', p3.shape is None and '混戦' in p3.reason, p3.reason)
+    p4 = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05], skip=True)
+    check('過大評価なら買わない', p4.shape is None, p4.reason)
+    p5 = bt.plan_race('R', hn[:5], [.6, .5, .5, .3, .2])
+    check('少頭数は買わない', p5.shape is None, p5.reason)
+
+    # 券種ごとの払戻表を混ぜても正しく引ける
+    plan_t = bt.plan_race('R', hn, [.5, .48, .45, .3, .2, .1, .1, .05])
+    plan_u = bt.plan_race('R', hn, [.6, .55, .5, .3, .2, .1, .1, .05])
+    nested = {'三連複': {'R': [(next(iter(plan_t.combos)), 5000)]},
+              '馬連': {'R': [(next(iter(plan_u.combos)), 800)]}}
+    rt = bt.evaluate([plan_t], nested)
+    ru = bt.evaluate([plan_u], nested)
+    check('券種別の払戻表を引き分ける',
+          rt['収支'] == 5000 - plan_t.cost and ru['収支'] == 800 - plan_u.cost,
+          f"{rt['収支']} / {ru['収支']}")
 
     # 同着は合算、買い目外は当たりにしない。
     # スコアが同値のときは馬番の大きい方が先に来るので、軸は [5, 9] になる
-    plan = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05])
+    plan = bt.plan_race('R', hn, [.6, .5, .5, .3, .2, .1, .1, .05],
+                        rules=((1.4, '三連複', '軸2頭→相手3頭'),))
     axis = sorted({h for c in plan.combos for h in c}
                   & set.intersection(*[set(c) for c in plan.combos]))
     check('同点時の軸が決まっている', axis == [5, 9], str(axis))

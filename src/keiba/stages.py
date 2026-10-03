@@ -512,6 +512,12 @@ def predict(push: bool = False, days_ahead: int = 10,
         days_ahead: 何日先まで見るか。
 
     この段はウェアハウスも学習済みモデルも使わないので、単独で何度でも回せる。
+
+    **ただし、だからこそモデルの上乗せは効いていない。** スコアは単勝オッズ
+    由来の市場確率（Harville）だけで、市場のコンセンサスをなぞっている。
+    学習済みモデルを効かせるには、出馬表の馬名から過去走を引く仕組みが要る。
+    新馬は過去走が1走も無いため、仕組みを足しても市場以上にはならない
+    （市場なしモデルの AUC は新馬で 0.61 とほぼランダム）。
     """
     import pickle
     from . import betting, config, fetch, shutuba
@@ -573,7 +579,13 @@ def predict(push: bool = False, days_ahead: int = 10,
     # スコアは「3着内確率」でなければならない。確信度の閾値（1.4）は
     # 上位3頭の3着内確率の合計で較正してある。1/オッズ をそのまま使うと
     # 尺度が違い（全馬の合計が約1.25）、常に閾値を下回って全レース見送りになる。
-    # 単勝オッズ → 勝率 → 3着内確率（Harville）へ変換する。
+    #
+    # 学習済みモデルは過去実績（前走着順・タイム偏差など）を必要とするが、
+    # 出馬表には入っていない。馬名から過去走を引く仕組みが要るため、
+    # それが無い間は市場（単勝オッズ → Harville）を唯一の情報源とする。
+    # つまりこの段は**市場のコンセンサスに乗っているだけで、モデルの
+    # 上乗せは効いていない**。新馬は特にそうで、過去走が1走も無いため
+    # 市場なしモデルの AUC は 0.61（ほぼランダム）しかない。
     import numpy as np
     from . import market
 
@@ -594,12 +606,16 @@ def predict(push: bool = False, days_ahead: int = 10,
 
     bought = [(c, p) for c, p in plans if p.shape]
     print(f'\n  買い目を出せたレース: {len(bought)} / {len(plans)}')
+    if bought:
+        total = sum(p.cost for _, p in bought)
+        kinds = pd.Series([p.bet_type for _, p in bought]).value_counts().to_dict()
+        print(f'  合計 {total:,} 円 / {sum(p.points for _, p in bought)} 点  {kinds}')
     for card, plan in bought:
         combos = sorted(tuple(sorted(c)) for c in plan.combos)
         left = shutuba.minutes_to_post(card)
         print(f'    [{card["start_time"]}] {card["venue_name"]} {card["race_num"]:>2}R '
               f'{(card["race_name"] or "")[:14]:16s} 確信度{plan.confidence:.2f} '
-              f'{plan.shape}（{plan.points}点）'
+              f'{plan.bet_type} {plan.shape}（{plan.points}点）'
               + (f'  発走まで{left}分' if left is not None else ''))
         print(f'      {combos}')
 

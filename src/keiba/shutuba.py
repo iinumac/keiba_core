@@ -127,6 +127,14 @@ def _fetch_odds_once(race_id: str, fetcher: Fetcher, action: str) -> Dict:
             out[int(umaban)] = {'odds': float(values[0]), 'popularity': int(values[2])}
         except (TypeError, ValueError, IndexError):
             continue
+    # 複勝は '2' に [下限, 上限, 人気] で入っている。3着内に来ることへの支持
+    place = (data.get('odds') or {}).get('2') or {}
+    for umaban, values in place.items():
+        try:
+            out.setdefault(int(umaban), {}).update(
+                place_min=float(values[0]), place_max=float(values[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
     return {'odds': out, 'updated_at': data.get('official_datetime'),
             'status': payload.get('status')}
 
@@ -225,6 +233,8 @@ def fetch_race_card(race_id: str, fetcher: Fetcher,
             o = table.get(h['horse_number'], {})
             h['odds'] = o.get('odds')
             h['popularity'] = o.get('popularity')
+            h['place_min'] = o.get('place_min')
+            h['place_max'] = o.get('place_max')
         card['odds_available'] = bool(table)
         card['odds_updated_at'] = info_odds['updated_at']
         card['odds_status'] = ODDS_STATUS.get(info_odds['status'], info_odds['status'])

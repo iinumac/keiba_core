@@ -829,6 +829,22 @@ def test_pace():
     check('比べるレースが少なければ判定しない', few['pace'].isna().all())
 
 
+def test_views():
+    """目線ごとの上位3頭の表。"""
+    print('\n[目線]')
+    from keiba import views
+    t = pd.DataFrame({'馬名': list('ABCDE'), '人気': [1, 2, 3, 4, 7], '印': ['', '', '', '', ''],
+                      '市場あり_順': [1, 2, 3, 4, 5], '指数・近3走_順': [4, 5, 3, 2, 1]},
+                     index=[1, 2, 3, 4, 5])
+    t['上位の目線の数'] = (t[['市場あり_順', '指数・近3走_順']] <= 3).sum(axis=1)
+    t['人気の割に評価が高い'] = (t['人気'] >= 4) & (t['上位の目線の数'] > 0)
+    top = views.top3_table(t)
+    check('目線ごとに3頭', list(top['目線']) == ['市場あり', '指数・近3走'], f"{list(top['目線'])}")
+    check('1番手は順位1の馬', top.iloc[1]['1番手'].startswith('5 E'))
+    md = views.to_markdown({'venue_name': '東京', 'race_num': 11, 'race_name': 'テスト'}, t)
+    check('人気薄で目線上位の馬を挙げる', '人気の割に評価が高い' in md and '5 E' in md.split('人気の割に評価が高い')[1])
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -928,7 +944,7 @@ def main():
                test_speed_features, test_recency_features, test_market,
                test_segments, test_betting, test_shutuba,
                test_strategy_stage_order,
-               test_pace, test_audit,
+               test_pace, test_views, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

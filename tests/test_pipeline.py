@@ -834,8 +834,11 @@ def test_views():
     print('\n[目線]')
     from keiba import views
     t = pd.DataFrame({'馬名': list('ABCDE'), '人気': [1, 2, 3, 4, 7], '印': ['', '', '', '', ''],
+                      '市場あり': [.6, .5, .4, .3, .2], '指数・近3走': [-.5, -.8, 0, .4, .9],
                       '市場あり_順': [1, 2, 3, 4, 5], '指数・近3走_順': [4, 5, 3, 2, 1]},
                      index=[1, 2, 3, 4, 5])
+    for v in ('市場あり', '指数・近3走'):
+        t[f'{v}_偏差値'] = views.deviation(t[v])
     t['上位の目線の数'] = (t[['市場あり_順', '指数・近3走_順']] <= 3).sum(axis=1)
     t['人気の割に評価が高い'] = (t['人気'] >= 4) & (t['上位の目線の数'] > 0)
     top = views.top3_table(t)
@@ -843,6 +846,10 @@ def test_views():
     check('1番手は順位1の馬', top.iloc[1]['1番手'].startswith('5 E'))
     md = views.to_markdown({'venue_name': '東京', 'race_num': 11, 'race_name': 'テスト'}, t)
     check('人気薄で目線上位の馬を挙げる', '人気の割に評価が高い' in md and '5 E' in md.split('人気の割に評価が高い')[1])
+    d = views.deviation(pd.Series([1.0, 2.0, 3.0, 4.0, 5.0]))
+    check('偏差値は平均が50', abs(d.mean() - 50) < 1e-9)
+    check('偏差値は標準偏差1つぶんが10', abs(d.iloc[-1] - (50 + 10 * 2 / pd.Series([1, 2, 3, 4, 5]).std())) < 1e-9)
+    check('全員同じ値なら偏差値50', (views.deviation(pd.Series([2.0, 2.0])) == 50).all())
 
 
 def test_audit():

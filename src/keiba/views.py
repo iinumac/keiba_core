@@ -84,6 +84,28 @@ def _figure_summary(fig: pd.DataFrame, horse_ids: List[str], as_of) -> pd.DataFr
         '上がり指数・近3走': g['l3f_figure'].apply(lambda x: x.dropna().tail(3).mean())})
 
 
+PERCENT_VIEWS = {'市場あり', '市場なし', '複勝支持率', '対戦比較'}
+"""確率として%で表示する目線。それ以外は1000mあたりの秒。"""
+
+
+def deviation(x: pd.Series) -> pd.Series:
+    """偏差値。そのレースの出走馬の中で、平均50・標準偏差1つぶんが10。
+
+    目線ごとに単位が違っても同じ物差しで比べられる。1番手と2番手の
+    偏差値の差を見れば、抜けているのか団子なのかが分かる。
+    """
+    sd = x.std()
+    if not np.isfinite(sd) or sd == 0:
+        return pd.Series(50.0, index=x.index).where(x.notna())
+    return 50 + 10 * (x - x.mean()) / sd
+
+
+def _fmt(v: str, x) -> str:
+    if pd.isna(x):
+        return '—'
+    return f'{x * 100:.1f}%' if v in PERCENT_VIEWS else f'{x:+.2f}秒'
+
+
 def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     """1レース分。馬ごとに各目線の値と順位を持つ表を返す。
 
@@ -141,6 +163,7 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     for v in VIEWS:
         if v in t:
             t[f'{v}_順'] = t[v].rank(ascending=False, method='min')
+            t[f'{v}_偏差値'] = deviation(t[v])
     rank_cols = [f'{v}_順' for v in VIEWS if f'{v}_順' in t]
     t['上位の目線の数'] = (t[rank_cols] <= 3).sum(axis=1)
     t['人気の割に評価が高い'] = (t['人気'] >= 4) & (t['上位の目線の数'] > 0)
@@ -148,25 +171,30 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
 
 
 def top3_table(t: pd.DataFrame) -> pd.DataFrame:
-    """目線ごとの1〜3番手。"""
+    """目線ごとの1〜3番手。値と偏差値、その目線の平均・標準偏差も付ける。"""
     rows = []
     for v in VIEWS:
         if f'{v}_順' not in t:
             continue
         top = t.sort_values(f'{v}_順').head(3)
-        rows.append({'目線': v, **{f'{i + 1}番手': f"{n} {r['馬名']}（{int(r['人気'])}人気）"
-                                   for i, (n, r) in enumerate(top.iterrows())}})
+        row = {'目線': v, '平均': _fmt(v, t[v].mean()),
+               '標準偏差': (f'{t[v].std() * 100:.1f}pt' if v in PERCENT_VIEWS else f'{t[v].std():.2f}秒')}
+        for i, (n, r) in enumerate(top.iterrows()):
+            row[f'{i + 1}番手'] = (f"{n} {r['馬名']}（{int(r['人気'])}人気）"
+                                 f"{_fmt(v, r[v])}・偏差値{r[f'{v}_偏差値']:.0f}")
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
 def to_markdown(card: Dict, t: pd.DataFrame) -> str:
-    """表示用。目線ごとの上位3頭と、人気の割に評価が高い馬。"""
+    """表示用。目線ごとの上位3頭（値・偏差値）と、人気の割に評価が高い馬。"""
     head = (f"### [{card.get('start_time')}] {card['venue_name']}{card['race_num']}R "
             f"{card['race_name']}（{card.get('surface')}{card.get('distance')}m・{len(t)}頭）\n")
     top = top3_table(t)
-    lines = [head, '| 目線 | 1番手 | 2番手 | 3番手 |', '|---|---|---|---|']
+    lines = [head, '| 目線 | 平均 | 標準偏差 | 1番手 | 2番手 | 3番手 |', '|---|---|---|---|---|---|']
     for _, r in top.iterrows():
-        lines.append(f"| {r['目線']} | {r.get('1番手', '')} | {r.get('2番手', '')} | {r.get('3番手', '')} |")
+        lines.append(f"| {r['目線']} | {r['平均']} | {r['標準偏差']} | {r.get('1番手', '')} | "
+                     f"{r.get('2番手', '')} | {r.get('3番手', '')} |")
     many = t[t['上位の目線の数'] >= 3].sort_values('上位の目線の数', ascending=False)
     if len(many):
         lines.append('\n**多くの目線で上位**: ' + '、'.join(

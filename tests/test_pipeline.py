@@ -809,6 +809,23 @@ def test_shutuba():
           f"{c2['added_value_in_race'].tolist()}")
 
 
+def test_pace():
+    """レースのペースの3段階分類。"""
+    print('\n[ペース]')
+    from keiba import pace
+    races = pd.DataFrame({
+        'venue_code': ['05'] * 40, 'surface': ['芝'] * 40, 'distance': [1600] * 40,
+        'track_condition': ['良'] * 40,
+        'pace_first3f': [34.0 + i * 0.05 for i in range(40)], 'pace_last3f': [35.0] * 40})
+    r = pace.add_race_pace(races)
+    check('前半が速いレースはハイ', r['pace'].iloc[0] == 'ハイ')
+    check('前半が遅いレースはスロー', r['pace'].iloc[-1] == 'スロー')
+    share = r['pace'].value_counts(normalize=True)
+    check('おおむね3等分', all(0.25 < share.get(k, 0) < 0.42 for k in pace.PACE_LABELS), f'{share.to_dict()}')
+    few = pace.add_race_pace(races.head(10))
+    check('比べるレースが少なければ判定しない', few['pace'].isna().all())
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -908,7 +925,7 @@ def main():
                test_speed_features, test_recency_features, test_market,
                test_segments, test_betting, test_shutuba,
                test_strategy_stage_order,
-               test_audit,
+               test_pace, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

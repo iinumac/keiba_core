@@ -62,7 +62,8 @@ def read_table(table: str, years: Optional[Iterable[int]] = None,
 # 特徴量計算はレース属性を1行に並べた形を前提にしているため、読み出し時に結合する。
 RACE_COLUMNS_FOR_FEATURES = ['date', 'venue_code', 'venue_name', 'surface',
                              'distance', 'track_condition', 'race_level',
-                             'level_score', 'race_name']
+                             'level_score', 'race_name',
+                             'pace_first3f', 'pace_last3f']
 
 
 def read_results_enriched(years: Optional[Iterable[int]] = None,

@@ -12,7 +12,7 @@ MANIFEST_PATH = WAREHOUSE_DIR / 'manifest.parquet'
 DUCKDB_PATH = DATA_DIR / 'keiba.duckdb'
 MODEL_DIR = PROJECT_ROOT / 'models'
 
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 """パーサの出力仕様のバージョン。
 
 parse.py の出力（列の追加・削除・値の意味の変更）を変えたら必ず上げること。

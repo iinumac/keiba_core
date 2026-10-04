@@ -200,6 +200,54 @@ def parse_passing_order(passing_str: str) -> Optional[List[int]]:
         return None
 
 
+LAP_RE = re.compile(r'\d+\.\d')
+PACE_RE = re.compile(r'\((\d+\.\d)-(\d+\.\d)\)')
+
+
+def parse_laps(soup) -> Dict:
+    """ラップ（200mごと）と、前半・後半3F。
+
+        ラップ  12.0 - 11.1 - 11.7 - 12.2 - 12.2 - 12.0 - 12.2 - 12.1
+        ペース  12.0 - 23.1 - ... - 95.5 (34.8-36.3)
+
+    距離が200mで割り切れないとき（1150m など）、最初のラップは端数区間になる。
+    """
+    out = {'lap_times': None, 'pace_first3f': None, 'pace_last3f': None}
+    table = soup.find('table', attrs={'summary': 'ラップタイム'})
+    if table is None:
+        return out
+    cells = table.find_all('td', class_='race_lap_cell')
+    if cells:
+        laps = [float(x) for x in LAP_RE.findall(cells[0].get_text())]
+        out['lap_times'] = laps or None
+    if len(cells) > 1:
+        m = PACE_RE.search(cells[1].get_text())
+        if m:
+            out['pace_first3f'], out['pace_last3f'] = float(m.group(1)), float(m.group(2))
+    return out
+
+
+def parse_corner_orders(soup) -> Dict:
+    """各コーナーの隊列（文字列のまま）。
+
+        3コーナー  (*2,12)(1,8,14)(13,16)(3,7,15)(4,11)(6,10)9-5
+
+    括弧は併走、- は離れていること、* は先頭を表す。
+    各馬の通過順は results の passing_order にあるので、ここでは隊列の
+    塊（どこで馬群が切れているか）を残すのが目的。
+    """
+    out = {f'corner{i}': None for i in range(1, 5)}
+    table = soup.find('table', attrs={'summary': 'コーナー通過順位'})
+    if table is None:
+        return out
+    for tr in table.find_all('tr'):
+        th, td = tr.find('th'), tr.find('td')
+        m = re.match(r'(\d)コーナー', th.get_text(strip=True)) if th else None
+        if m and td:
+            out[f'corner{m.group(1)}'] = td.get_text(strip=True)
+    return out
+
+
 def parse_race_html_full(html_path: Path) -> Dict:
     """
     レースHTMLをパースして全データを抽出
@@ -456,5 +504,8 @@ def parse_race_html_full(html_path: Path) -> Dict:
         # 出走頭数
         race_info['horse_count'] = len(horses)
     
+    race_info.update(parse_laps(soup))
+    race_info.update(parse_corner_orders(soup))
+
     payouts = parse_payouts(raw_html, race_id)
     return {'race_info': race_info, 'horses': horses, 'payouts': payouts}

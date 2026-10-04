@@ -816,7 +816,10 @@ def test_pace():
     races = pd.DataFrame({
         'venue_code': ['05'] * 40, 'surface': ['芝'] * 40, 'distance': [1600] * 40,
         'track_condition': ['良'] * 40,
-        'pace_first3f': [34.0 + i * 0.05 for i in range(40)], 'pace_last3f': [35.0] * 40})
+        # 実際の偏差はほぼ正規分布。その分位点で並べる
+        'pace_first3f': [34.0 + 0.5 * float(x) for x in
+                         __import__('scipy').stats.norm.ppf([(i + 0.5) / 40 for i in range(40)])],
+        'pace_last3f': [35.0] * 40})
     r = pace.add_race_pace(races)
     check('前半が速いレースはハイ', r['pace'].iloc[0] == 'ハイ')
     check('前半が遅いレースはスロー', r['pace'].iloc[-1] == 'スロー')

@@ -489,6 +489,15 @@ def test_market():
     check('中穴は Harville より高く見積もる', p[5] > hv[5], f'{p[5]:.3f} / {hv[5]:.3f}')
     check('不正なオッズは欠損', np.isnan(market.top3_from_support(np.array([2.0, 0.0, 5.0])))[1])
 
+    # 単勝・複勝・レースの形を組み合わせた市場の見込み
+    win = np.array([1.5, 6.0, 8.0, 12.0, 20.0, 40.0, 80.0, 120.0])
+    pmin = np.array([1.1, 1.8, 2.2, 3.0, 4.5, 8.0, 15.0, 20.0]); pmax = pmin * 1.5
+    pop = np.arange(1, 9)
+    m3 = market.market_top3(win, pmin, pmax, pop)
+    check('市場の見込みは確率の範囲', ((m3 > 0) & (m3 < 1)).all())
+    check('市場の見込みは人気順に下がる', (np.diff(m3) < 0).all(), f'{np.round(m3, 3)}')
+    check('市場の見込みの合計はおおむね3頭分', 2.5 < m3.sum() < 3.5, f'{m3.sum():.2f}')
+
 def test_segments():
     """レースの区分。荒れ具合と回収率は別物なので両方出せること。"""
     print('\n[区分]')

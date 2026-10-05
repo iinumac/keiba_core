@@ -9,7 +9,7 @@
     指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）
     指数・最高           同じく過去最高値（能力の天井）
     上がり指数・近3走    上がり3Fを同じく補正したものの直近3走平均
-    複勝支持率           複勝オッズから見た、3着内に来ることへの市場の支持
+    市場の見込み         単勝・複勝オッズとレースの形から見た、市場の3着内見込み
     前走パフォーマンス   前走のレースレベル − 勝ち馬との差（race_level）
     能力                 過去2年の対戦をつないだ地力（race_level）
     対戦比較             直接・間接の対戦から見た、他の馬に先着する確率の平均（h2h）
@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 VIEWS = ['市場あり', '市場なし', '指数・近3走', '指数・最高', '上がり指数・近3走',
-         '複勝支持率', '前走パフォーマンス', '能力', '対戦比較']
+         '市場の見込み', '前走パフォーマンス', '能力', '対戦比較']
 
 _CACHE: Dict[str, object] = {}
 
@@ -84,7 +84,7 @@ def _figure_summary(fig: pd.DataFrame, horse_ids: List[str], as_of) -> pd.DataFr
         '上がり指数・近3走': g['l3f_figure'].apply(lambda x: x.dropna().tail(3).mean())})
 
 
-PERCENT_VIEWS = {'市場あり', '市場なし', '複勝支持率', '対戦比較'}
+PERCENT_VIEWS = {'市場あり', '市場なし', '市場の見込み', '対戦比較'}
 """確率として%で表示する目線。それ以外は1000mあたりの秒。"""
 
 
@@ -142,11 +142,12 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     for c in fs.columns:
         t[c] = t['horse_id'].map(fs[c])
 
+    from . import market
     pmin = np.array([hs[n].get('place_min') or np.nan for n in nums], float)
     pmax = np.array([hs[n].get('place_max') or np.nan for n in nums], float)
-    inv = 1 / np.sqrt(pmin * pmax)
-    if np.isfinite(inv).any():
-        t['複勝支持率'] = np.clip(3 * inv / np.nansum(inv), 0, 0.99)
+    pops = np.array([hs[n].get('popularity') or np.nan for n in nums], float)
+    if np.isfinite(pmin).all() and np.isfinite(pmax).all() and np.isfinite(pops).all():
+        t['市場の見込み'] = market.market_top3(t['単勝'].to_numpy(float), pmin, pmax, pops)
 
     runs = hist['runs']
     level, ability = race_level.fit(runs, as_of)

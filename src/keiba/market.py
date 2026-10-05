@@ -126,6 +126,57 @@ def fit_support_top3(df: pd.DataFrame, odds_col: str = 'odds',
     return (float(lr.intercept_[0]),) + tuple(float(c) for c in lr.coef_[0])
 
 
+MARKET_TOP3_COEF = (0.5994253789234577, 0.8536166847732509, 0.22296455233004087,
+                    -0.38051752484321366, 0.055522346559719486, -0.029502109139745172)
+"""`market_top3` の係数（切片, 単勝換算, 複勝支持率, log有力馬の数, log人気, 複勝×有力馬）。
+2022〜2024年の全レース（5頭以上）で学習（fit_market_top3）。"""
+
+
+def _logit(p):
+    p = np.clip(np.asarray(p, float), 1e-4, 0.9999)
+    return np.log(p / (1 - p))
+
+
+def place_support(place_min, place_max) -> np.ndarray:
+    """複勝オッズ（下限・上限）から複勝支持率。合計が3（3着までの3頭分）になるよう正規化。"""
+    inv = 1 / np.sqrt(np.asarray(place_min, float) * np.asarray(place_max, float))
+    return np.clip(3 * inv / np.nansum(inv), 1e-4, 0.99)
+
+
+def _market_terms(win, place_min, place_max, popularity) -> np.ndarray:
+    win = np.asarray(win, float)
+    ws = implied_win_prob(win)
+    n_eff = 1.0 / np.sum(ws ** 2)
+    lp = _logit(place_support(place_min, place_max))
+    ln = np.log(n_eff) * np.ones(len(win))
+    return np.column_stack([_logit(top3_from_support(win)), lp, ln,
+                            np.log(np.clip(np.asarray(popularity, float), 1, None)), lp * ln])
+
+
+def market_top3(win, place_min, place_max, popularity, coef=None) -> np.ndarray:
+    """市場の3着内見込み（1レース分）。単勝換算・複勝支持率・レースの形を組み合わせた式。
+
+    単勝からの換算だけだと、1強のレースの2番手以下を低く、混戦の1番人気を高く見すぎる
+    （支持率は「勝つ」ことへの支持なので）。複勝支持率（3着内への支持）と、
+    有力馬の数（1÷単勝支持率の2乗の合計）・人気順位を加えるとずれが減る。
+    2025〜2026年の評価で 対数損失 0.4027→0.4013、AUC 0.8198→0.8213。docs/MARKET.md。
+    """
+    c = np.asarray(coef if coef is not None else MARKET_TOP3_COEF)
+    z = c[0] + _market_terms(win, place_min, place_max, popularity) @ c[1:]
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def fit_market_top3(df: pd.DataFrame, race_col: str = 'race_id', target: str = 'is_top3'):
+    """MARKET_TOP3_COEF を学習し直す。df は win / place_min / place_max / win_pop と目的変数を持つ。"""
+    from sklearn.linear_model import LogisticRegression
+    X, y = [], []
+    for _, g in df.groupby(race_col):
+        X.append(_market_terms(g['win'], g['place_min'], g['place_max'], g['win_pop']))
+        y.append(g[target].to_numpy())
+    lr = LogisticRegression(max_iter=1000).fit(np.vstack(X), np.concatenate(y))
+    return (float(lr.intercept_[0]),) + tuple(float(c) for c in lr.coef_[0])
+
+
 def add_market_probs(df: pd.DataFrame, odds_col: str = 'odds',
                      race_col: str = 'race_id') -> pd.DataFrame:
     """`p_mkt_win` と `p_mkt_top3` を付けて返す。

@@ -159,6 +159,8 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     t['能力'] = t['horse_id'].map(ability)
 
     table, _ = h2h.rank(hist['h2h'], list(t['horse_id']), as_of)
+    # 比較できる相手が1頭もいない馬（新馬など）は 0.5 になり、同点の1番手が並んでしまう
+    table = table[table['known'] > 0]
     t['対戦比較'] = t['horse_id'].map(table.set_index('horse_id')['score'])
 
     for v in VIEWS:

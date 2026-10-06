@@ -5,7 +5,7 @@
 
     目線                 何を見ているか
     市場あり             買い目用モデルの3着内確率（オッズ込みの総合評価）
-    市場なし             オッズを使わないモデルの3着内確率（能力だけの評価）
+    市場なし             オッズを使わないモデルの3着内確率（能力だけの評価。レース内の合計を3に揃える）
     指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）
     指数・最高           同じく過去最高値（能力の天井）
     上がり指数・近3走    上がり3Fを同じく補正したものの直近3走平均
@@ -176,8 +176,12 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
         t['市場あり'] = pd.Series(dict(zip(scored['horse_number'], scored['score'])))
         up = stages._UPCOMING_CACHE[rid].set_index('horse_number')
         free = _free_model()
-        t['市場なし'] = pd.Series(free['model'].predict(stages.model_input(up.reset_index(), free['features'])),
-                                index=up.index)
+        raw = pd.Series(free['model'].predict(stages.model_input(up.reset_index(), free['features'])),
+                        index=up.index).reindex(t.index)
+        # 市場なしの確率は頭数を見ていない（少頭数で低く、多頭数で高く出る）。3着内は3頭なので
+        # 合計が3になるよう揃えると、頭数によるずれがほぼ消える（2026年で AUC 0.755→0.777。
+        # scripts/prob_vs_deviation.py）
+        t['市場なし'] = (raw * 3 / raw.sum()).clip(upper=0.99)
         t['印'] = [('過大評価' if up.loc[n, '_over'] else '実績が薄い' if up.loc[n, '_thin'] else '')
                   if n in up.index else '' for n in t.index]
 

@@ -38,12 +38,26 @@ def _history():
     """全履歴から作るもの（指数・レースレベルの走歴・対戦の索引）。"""
     if 'hist' in _CACHE:
         return _CACHE['hist']
-    from . import figure, h2h, race_level, store
+    from . import figure, h2h, pace, race_level, store
     races, results = store.load_for_features()
     fig = figure.add_figures(results, races).sort_values(['horse_id', 'race_date', 'race_id'])
     fig['horse_id'] = fig['horse_id'].astype(str)
     raw_races, raw_results = store.read_table('races'), store.read_table('results')
-    out = {'fig': fig[['horse_id', 'race_date', 'figure', 'l3f_figure']],
+    # フラグ用の走ごとの情報
+    pc = pace.add_horse_pace_features(results, races)
+    pc['horse_id'] = pc['horse_id'].astype(str); pc['race_id'] = pc['race_id'].astype(str)
+    t_ = pd.to_numeric(pc['time_seconds'], errors='coerce')
+    fin = pd.to_numeric(pc['finish_position'], errors='coerce')
+    t5 = t_.where(fin == 5).groupby(pc['race_id']).transform('min')
+    info = pd.DataFrame({'horse_id': pc['horse_id'], 'race_id': pc['race_id'], 'race_date': pc['race_date'],
+                         'surface': pc['surface'], 'level_score': pc['level_score'], 'fin': fin,
+                         'pop': pd.to_numeric(pc['popularity'], errors='coerce'),
+                         'spread5': t5 - t_.groupby(pc['race_id']).transform('min'),
+                         'pos': pc['pos'], 'l3f_vs_pos': pc['l3f_vs_pos']})
+    fig_k = fig.assign(race_id=fig['race_id'].astype(str))[['horse_id', 'race_id', 'figure']]
+    info = info.merge(fig_k, on=['horse_id', 'race_id'], how='left').sort_values(['horse_id', 'race_date', 'race_id'])
+    out = {'info': info,
+           'fig': fig[['horse_id', 'race_date', 'figure', 'l3f_figure']],
            'runs': race_level.prepare_runs(raw_races, raw_results),
            'h2h': h2h.History(raw_races, raw_results)}
     _CACHE['hist'] = out
@@ -106,12 +120,42 @@ def _fmt(v: str, x) -> str:
     return f'{x * 100:.1f}%' if v in PERCENT_VIEWS else f'{x:+.2f}秒'
 
 
+def _add_flag_inputs(t: pd.DataFrame, card: Dict, info: pd.DataFrame, as_of, hs: Dict) -> None:
+    """flags.COLUMNS の値を t に足す（すべてレースより前の情報）。"""
+    from . import market, shutuba
+    from .parse import classify_race_level
+    t['fig_best_rank'] = t['指数・最高'].rank(ascending=False, method='min')
+    t['l3fig_r3_rank'] = t['上がり指数・近3走'].rank(ascending=False, method='min')
+    t['fig_r3_gap'] = t['指数・近3走'] - t['指数・近3走'].max()
+    past = info[info['horse_id'].isin(set(t['horse_id'])) & (info['race_date'] < as_of)]
+    last = past.groupby('horse_id').tail(1).set_index('horse_id')
+    t['fig_p1'] = t['horse_id'].map(last['figure'])
+    t['style'] = t['horse_id'].map(past.groupby('horse_id')['pos'].mean())
+    t['p1_l3f_vs_pos'] = t['horse_id'].map(last['l3f_vs_pos'])
+    t['days_since_last'] = (as_of - t['horse_id'].map(last['race_date'])).dt.days
+    surf = shutuba.SURFACE_TO_WAREHOUSE.get(card.get('surface'), card.get('surface'))
+    prev_surf = t['horse_id'].map(last['surface'])
+    t['surface_change'] = (prev_surf != surf).astype(float).where(prev_surf.notna())
+    prize = shutuba._first_prize(card.get('condition'))
+    level = classify_race_level(prize)[1] if prize is not None else np.nan
+    prev_level = t['horse_id'].map(last['level_score'])
+    t['level_up'] = (level > prev_level).astype(float).where(prev_level.notna() & pd.notna(level))
+    t['prev_fin'] = t['horse_id'].map(last['fin'])
+    t['p1_gap'] = t['prev_fin'] - t['horse_id'].map(last['pop'])
+    t['p1_spread5'] = t['horse_id'].map(last['spread5'])
+    if '市場の見込み' in t:
+        pmin = np.array([hs[n].get('place_min') for n in t.index], float)
+        pmax = np.array([hs[n].get('place_max') for n in t.index], float)
+        t['place_vs_win'] = np.log(market.place_support(pmin, pmax)
+                                   / np.clip(market.top3_from_support(t['単勝'].to_numpy(float)), 1e-4, 1))
+
+
 def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     """1レース分。馬ごとに各目線の値と順位を持つ表を返す。
 
     card は shutuba.fetch_race_card の結果（オッズ入り。date が入っていること）。
     """
-    from . import h2h, race_level, stages
+    from . import flags, h2h, market, race_level, stages
     as_of = pd.Timestamp(as_of or card['date'])
     hs = {h['horse_number']: h for h in card['horses'] if h.get('odds')}
     if not hs:
@@ -163,6 +207,15 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     table = table[table['known'] > 0]
     t['対戦比較'] = t['horse_id'].map(table.set_index('horse_id')['score'])
 
+    _add_flag_inputs(t, card, hist['info'], as_of, hs)
+    fl, pk = flags.flop_flags(t), flags.pickup_flags(t)
+    t['凡走フラグ数'], t['ピックアップフラグ数'] = fl.sum(axis=1), pk.sum(axis=1)
+    t['凡走フラグ'] = [flags.describe(r, fl) for _, r in t.iterrows()]
+    t['ピックアップフラグ'] = [flags.describe(r, pk) for _, r in t.iterrows()]
+    base = t['市場の見込み'] if '市場の見込み' in t else pd.Series(
+        market.top3_from_support(t['単勝'].to_numpy(float)), index=t.index)
+    t['補正スコア'] = flags.calibrated(base, t['ピックアップフラグ数'], t['凡走フラグ数'])
+
     for v in VIEWS:
         if v in t:
             t[f'{v}_順'] = t[v].rank(ascending=False, method='min')
@@ -190,25 +243,39 @@ def top3_table(t: pd.DataFrame) -> pd.DataFrame:
 
 
 def to_markdown(card: Dict, t: pd.DataFrame) -> str:
-    """表示用。目線ごとの上位3頭（値・偏差値）と、人気の割に評価が高い馬。"""
+    """表示用。全馬の一覧・目線ごとのランキング・ピックアップリスト・要注意リスト。"""
+    def pct(x):
+        return '—' if pd.isna(x) else f'{x * 100:.1f}%'
     head = (f"### [{card.get('start_time')}] {card['venue_name']}{card['race_num']}R "
-            f"{card['race_name']}（{card.get('surface')}{card.get('distance')}m・{len(t)}頭）\n")
-    top = top3_table(t)
-    lines = [head, '| 目線 | 平均 | 標準偏差 | 1番手 | 2番手 | 3番手 |', '|---|---|---|---|---|---|']
-    for _, r in top.iterrows():
-        lines.append(f"| {r['目線']} | {r['平均']} | {r['標準偏差']} | {r.get('1番手', '')} | "
-                     f"{r.get('2番手', '')} | {r.get('3番手', '')} |")
-    many = t[t['上位の目線の数'] >= 3].sort_values('上位の目線の数', ascending=False)
-    if len(many):
-        lines.append('\n**多くの目線で上位**: ' + '、'.join(
-            f"{n} {r['馬名']}（{int(r['人気'])}人気・{int(r['上位の目線の数'])}目線）" for n, r in many.iterrows()))
-    sleepers = t[t['人気の割に評価が高い']].sort_values('上位の目線の数', ascending=False)
-    if len(sleepers):
-        def which(r):
-            return '／'.join(v for v in VIEWS if r.get(f'{v}_順', 99) <= 3)
-        lines.append('\n**人気の割に評価が高い**: ' + '、'.join(
-            f"{n} {r['馬名']}（{int(r['人気'])}人気：{which(r)}）" for n, r in sleepers.iterrows()))
-    marks = t[t['印'] != '']
-    if len(marks):
-        lines.append('\n印: ' + '、'.join(f"{n} {r['馬名']}＝{r['印']}" for n, r in marks.iterrows()))
-    return '\n'.join(lines)
+            f"{card['race_name']}（{card.get('surface')}{card.get('distance')}m・{len(t)}頭）")
+    L = [head, '', '**1. 全馬の一覧**（補正スコア順。確率はすべて3着内）', '',
+         '| 馬番 | 馬名 | 人気 | 単勝 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ | 凡走 | 印 |',
+         '|---|---|---|---|---|---|---|---|---|---|---|']
+    for n, r in t.sort_values('補正スコア', ascending=False).iterrows():
+        L.append(f"| {n} | {r['馬名']} | {int(r['人気'])} | {r['単勝']} | {pct(r.get('市場あり'))} | {pct(r.get('市場なし'))} | "
+                 f"{pct(r.get('市場の見込み'))} | {pct(r['補正スコア'])} | {int(r['ピックアップフラグ数'])} | "
+                 f"{int(r['凡走フラグ数'])} | {r['印']} |")
+    L += ['', '**2. 目線ごとのランキング**', '',
+          '| 目線 | 平均 | 標準偏差 | 1番手 | 2番手 | 3番手 |', '|---|---|---|---|---|---|']
+    for _, r in top3_table(t).iterrows():
+        L.append(f"| {r['目線']} | {r['平均']} | {r['標準偏差']} | {r.get('1番手', '')} | "
+                 f"{r.get('2番手', '')} | {r.get('3番手', '')} |")
+    pick = t[(t['ピックアップフラグ数'] >= PICKUP_MIN) | ((t['人気'] >= 4) & (t['ピックアップフラグ数'] >= PICKUP_MIN - 1))]
+    L += ['', f'**3. ピックアップ**（フラグ{PICKUP_MIN}個以上、人気4番以下は{PICKUP_MIN - 1}個以上）', '']
+    for n, r in pick.sort_values(['ピックアップフラグ数', '人気'], ascending=[False, True]).iterrows():
+        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{int(r['ピックアップフラグ数'])}個）：{r['ピックアップフラグ']}")
+    if pick.empty:
+        L.append('- 該当なし')
+    warn = t[(t['人気'] <= CAUTION_POP) & (t['凡走フラグ数'] >= CAUTION_MIN)]
+    L += ['', f'**4. 要注意**（{CAUTION_POP}番人気以内で凡走フラグ{CAUTION_MIN}個以上）', '']
+    for n, r in warn.sort_values(['凡走フラグ数', '人気'], ascending=[False, True]).iterrows():
+        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{int(r['凡走フラグ数'])}個）：{r['凡走フラグ']}")
+    if warn.empty:
+        L.append('- 該当なし')
+    return '\n'.join(L)
+
+
+PICKUP_MIN = 4
+"""ピックアップに載せるフラグの数。人気4番以下は1つ少なくてよい（フラグ3個で3着内16%、0個の倍近い）。"""
+CAUTION_POP, CAUTION_MIN = 5, 4
+"""要注意に載せる人気の範囲とフラグの数（1〜3番人気でフラグ4個なら凡走率35〜37%）。"""

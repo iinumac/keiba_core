@@ -850,15 +850,40 @@ def test_views():
         t[f'{v}_偏差値'] = views.deviation(t[v])
     t['上位の目線の数'] = (t[['市場あり_順', '指数・近3走_順']] <= 3).sum(axis=1)
     t['人気の割に評価が高い'] = (t['人気'] >= 4) & (t['上位の目線の数'] > 0)
+    t = t.assign(単勝=[2.0, 4.0, 6.0, 10.0, 30.0], 補正スコア=[.6, .5, .4, .3, .2],
+                 ピックアップフラグ数=[0, 1, 0, 2, 5], 凡走フラグ数=[4, 0, 1, 0, 0],
+                 ピックアップフラグ=['', '', '', '', '指数(最高)がメンバー内で上位'], 凡走フラグ=['芝ダ替わり', '', '', '', ''])
     top = views.top3_table(t)
     check('目線ごとに3頭', list(top['目線']) == ['市場あり', '指数・近3走'], f"{list(top['目線'])}")
     check('1番手は順位1の馬', top.iloc[1]['1番手'].startswith('5 E'))
     md = views.to_markdown({'venue_name': '東京', 'race_num': 11, 'race_name': 'テスト'}, t)
-    check('人気薄で目線上位の馬を挙げる', '人気の割に評価が高い' in md and '5 E' in md.split('人気の割に評価が高い')[1])
+    check('全馬の一覧がある', '1. 全馬の一覧' in md and '| 5 | E |' in md)
+    check('ピックアップに人気薄の馬が載る', '5 E（7人気・5個）' in md.split('3. ピックアップ')[1])
+    check('要注意に凡走フラグの多い人気馬が載る', '1 A（1人気・4個）' in md.split('4. 要注意')[1])
     d = views.deviation(pd.Series([1.0, 2.0, 3.0, 4.0, 5.0]))
     check('偏差値は平均が50', abs(d.mean() - 50) < 1e-9)
     check('偏差値は標準偏差1つぶんが10', abs(d.iloc[-1] - (50 + 10 * 2 / pd.Series([1, 2, 3, 4, 5]).std())) < 1e-9)
     check('全員同じ値なら偏差値50', (views.deviation(pd.Series([2.0, 2.0])) == 50).all())
+
+
+def test_flags():
+    """ピックアップ・凡走フラグと補正スコア。"""
+    print('\n[フラグ]')
+    from keiba import flags
+    t = pd.DataFrame({'fig_best_rank': [1, 9], 'l3fig_r3_rank': [2, 10], 'fig_r3_gap': [0.0, -1.0],
+                      'fig_p1': [0.8, -0.5], 'style': [0.5, 0.1], 'p1_l3f_vs_pos': [0.5, -0.5],
+                      'days_since_last': [14, 120], 'surface_change': [0, 1], 'level_up': [0, 1],
+                      'p1_gap': [-5, 4], 'prev_fin': [1, 9], 'p1_spread5': [1.5, 0.2], 'place_vs_win': [0.1, -0.3]})
+    pk, fl = flags.pickup_flags(t), flags.flop_flags(t)
+    check('好材料の馬はピックアップが全部立つ', pk.iloc[0].all(), f'{pk.iloc[0].sum()}/{len(pk.columns)}')
+    check('悪材料の馬は凡走フラグが全部立つ', fl.iloc[1].all(), f'{fl.iloc[1].sum()}/{len(fl.columns)}')
+    check('好材料の馬に凡走フラグは立たない', not fl.iloc[0].any())
+    empty = pd.DataFrame(index=[0])
+    check('値が無ければフラグは立たない', not flags.pickup_flags(empty).any(axis=None) and not flags.flop_flags(empty).any(axis=None))
+    c = flags.calibrated([0.3, 0.3, 0.3], [0, 5, 0], [0, 0, 5])
+    check('ピックアップが多いと補正スコアが上がる', c[1] > c[0])
+    check('凡走フラグが多いと補正スコアが下がる', c[2] < c[0])
+    check('補正は小さい（市場の見込みから数pt以内）', abs(c[1] - 0.3) < 0.05 and abs(c[2] - 0.3) < 0.05, f'{c}')
 
 
 def test_audit():
@@ -960,7 +985,7 @@ def main():
                test_speed_features, test_recency_features, test_market,
                test_segments, test_betting, test_shutuba,
                test_strategy_stage_order,
-               test_pace, test_views, test_audit,
+               test_pace, test_views, test_flags, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

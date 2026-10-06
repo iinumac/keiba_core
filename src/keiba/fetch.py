@@ -45,6 +45,31 @@ BROWSER_HEADERS = {
 }
 
 
+def on_colab() -> bool:
+    """Colab のランタイムの中で動いているか（ブラウザのノートブックでも Colab CLI でも真）。"""
+    import os
+    return bool(os.environ.get('COLAB_RELEASE_TAG'))
+
+
+class LocalFetchBlocked(RuntimeError):
+    """手元の端末から netkeiba に直接アクセスしようとした。"""
+
+
+def ensure_allowed() -> None:
+    """netkeiba へのアクセスは Colab 経由に限る。
+
+    手元の端末から大量に取ると、手元のIPアドレスが netkeiba に制限される
+    （2026-10-06 に実際に起きた）。手元から取りたいときは keiba.colab_remote を使う。
+    どうしても手元から取るときだけ、環境変数 KEIBA_ALLOW_LOCAL_FETCH=1 で許可する。
+    """
+    import os
+    if on_colab() or os.environ.get('KEIBA_ALLOW_LOCAL_FETCH') == '1':
+        return
+    raise LocalFetchBlocked(
+        'netkeiba へのアクセスは Colab 経由にしてください（keiba.colab_remote）。'
+        '手元から取ると手元のIPが制限されます。どうしても必要なら KEIBA_ALLOW_LOCAL_FETCH=1。')
+
+
 class Outcome(str, Enum):
     SAVED = 'saved'
     EXISTS = 'exists'
@@ -81,6 +106,7 @@ class Fetcher:
 
     def warm_up(self) -> bool:
         """トップページを1回踏んで Cookie を得る。403 対策。"""
+        ensure_allowed()
         try:
             self._throttle()
             r = self.session.get(config.NETKEIBA_DB + '/', timeout=self.timeout)
@@ -92,6 +118,7 @@ class Fetcher:
     # -- 公開 ---------------------------------------------------------------
     def get(self, url: str, referer: Optional[str] = None):
         """GET。リトライ込み。失敗時は None。"""
+        ensure_allowed()
         if not self.warmed_up:
             self.warm_up()
 

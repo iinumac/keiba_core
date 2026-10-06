@@ -473,5 +473,47 @@ def to_result_rows(cards: List[Dict]) -> 'pandas.DataFrame':
     return pd.DataFrame(rows)
 
 
+RACE_UPDATE_KEYS = ('odds_available', 'odds_updated_at', 'odds_status')
+HORSE_UPDATE_KEYS = ('odds', 'popularity', 'place_min', 'place_max', 'horse_weight')
+"""取り直したときに入れ替える項目。オッズと馬体重だけ（どちらも発走直前まで変わる）。"""
+
+
+def merge_cards(saved: List[Dict], fresh: List[Dict]) -> List[Dict]:
+    """保存済みの出馬表に、取り直した出馬表のオッズと馬体重を反映する。
+
+    直前運用では発走が近いレースだけを取り直すので、丸ごと置き換えると
+    取り直さなかったレースが消えてしまう（2026-10-03 に週末48レースが5レースになった）。
+
+    - 保存済みのレース: オッズ・馬体重（RACE_UPDATE_KEYS / HORSE_UPDATE_KEYS）だけを入れ替える。
+      取り直した側が空（None）の値では上書きしない。保存済みに無い項目は足す
+    - 保存済みに無いレース: そのまま加える
+    - 取り直さなかったレース・馬: そのまま残す
+    """
+    out = {str(c['race_id']): c for c in saved}
+    for c in fresh:
+        rid = str(c['race_id'])
+        if rid not in out:
+            out[rid] = c
+            continue
+        old = out[rid]
+        for k in RACE_UPDATE_KEYS:
+            if c.get(k) is not None:
+                old[k] = c[k]
+        for k, v in c.items():
+            old.setdefault(k, v)
+        horses = {h.get('horse_number'): h for h in old.get('horses', [])}
+        for h in c.get('horses', []):
+            oh = horses.get(h.get('horse_number'))
+            if oh is None:
+                old.setdefault('horses', []).append(h)
+                continue
+            for k in HORSE_UPDATE_KEYS:
+                if h.get(k) is not None:
+                    oh[k] = h[k]
+            for k, v in h.items():
+                oh.setdefault(k, v)
+    return sorted(out.values(), key=lambda c: (c.get('date') or '', str(c['race_id'])))
+
+
 def to_json(cards: List[Dict], indent: int = 1) -> str:
     return json.dumps(cards, ensure_ascii=False, indent=indent)

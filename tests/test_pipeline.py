@@ -886,6 +886,29 @@ def test_flags():
     check('補正は小さい（市場の見込みから数pt以内）', abs(c[1] - 0.3) < 0.05 and abs(c[2] - 0.3) < 0.05, f'{c}')
 
 
+def test_merge_cards():
+    """取り直した出馬表は、オッズと馬体重だけ反映し、ほかのレースを消さない。"""
+    print('\n[出馬表の保存]')
+    from keiba import shutuba
+    saved = [{'race_id': 'A', 'date': '2026-10-03', 'odds_status': '発売中',
+              'horses': [{'horse_number': 1, 'horse_name': '甲', 'odds': 3.0, 'horse_weight': None, 'impost': 55},
+                         {'horse_number': 2, 'horse_name': '乙', 'odds': 5.0, 'horse_weight': 480}]},
+             {'race_id': 'B', 'date': '2026-10-03', 'horses': [{'horse_number': 1, 'odds': 2.0}]}]
+    fresh = [{'race_id': 'A', 'date': '2026-10-03', 'odds_status': '確定', 'horse_count': 99,
+              'horses': [{'horse_number': 1, 'horse_name': '甲', 'odds': 2.5, 'horse_weight': 470, 'impost': 57},
+                         {'horse_number': 2, 'horse_name': '乙', 'odds': 6.0, 'horse_weight': None}]},
+             {'race_id': 'C', 'date': '2026-10-04', 'horses': []}]
+    m = {c['race_id']: c for c in shutuba.merge_cards(saved, fresh)}
+    a = {h['horse_number']: h for h in m['A']['horses']}
+    check('取り直さなかったレースは残る', set(m) == {'A', 'B', 'C'}, f'{sorted(m)}')
+    check('オッズは新しい値になる', a[1]['odds'] == 2.5 and a[2]['odds'] == 6.0)
+    check('馬体重は新しい値になる', a[1]['horse_weight'] == 470)
+    check('空の値では上書きしない', a[2]['horse_weight'] == 480)
+    check('オッズと馬体重以外は変えない', a[1]['impost'] == 55)
+    check('オッズの状態は新しい値になる', m['A']['odds_status'] == '確定')
+    check('保存済みに無い項目は足す', m['A']['horse_count'] == 99)
+
+
 def test_audit():
     print('\n[抜けの検出]')
     from keiba import audit
@@ -985,7 +1008,7 @@ def main():
                test_speed_features, test_recency_features, test_market,
                test_segments, test_betting, test_shutuba,
                test_strategy_stage_order,
-               test_pace, test_views, test_flags, test_audit,
+               test_pace, test_views, test_flags, test_merge_cards, test_audit,
                test_pipeline_range, test_duckdb,
                test_store_upsert_is_isolated]:
         fn()

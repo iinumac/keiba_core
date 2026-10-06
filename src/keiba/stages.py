@@ -709,6 +709,7 @@ def predict(push: bool = False, days_ahead: int = 10,
 
     新馬は学習対象外（過去走が無い）なので買わない。
     """
+    import json
     import pickle
     from . import betting, config, fetch, shutuba
 
@@ -774,12 +775,23 @@ def predict(push: bool = False, days_ahead: int = 10,
               f'（{cards[0].get("odds_status") or "不明"}）')
 
     if save_json and cards:
+        # 上書きではなく、保存済みの週末のファイルにオッズと馬体重を反映する
+        # （発走が近いレースだけ取り直したとき、ほかのレースを消さないため）
         out = config.DATA_DIR / 'shutuba'
         out.mkdir(parents=True, exist_ok=True)
-        day = cards[0].get('date') or dt.date.today().isoformat()
-        path = out / f'{day}_weekend.json'
-        path.write_text(shutuba.to_json(cards), encoding='utf-8')
-        print(f'  保存: {path}')
+        ids = {str(c['race_id']) for c in cards}
+        path, saved = None, []
+        for p in sorted(out.glob('*_weekend.json'), reverse=True):
+            got = json.loads(p.read_text(encoding='utf-8'))
+            if ids & {str(c['race_id']) for c in got}:
+                path, saved = p, got
+                break
+        if path is None:
+            day = min(c.get('date') or dt.date.today().isoformat() for c in cards)
+            path = out / f'{day}_weekend.json'
+        merged = shutuba.merge_cards(saved, cards)
+        path.write_text(shutuba.to_json(merged), encoding='utf-8')
+        print(f'  保存: {path}（{len(merged)}レース。うち今回取得 {len(cards)}）')
 
     # オッズが出ているレースだけ買い目を出す。
     #

@@ -72,6 +72,7 @@ for c in sorted(cards, key=lambda c: c['race_id']):
         continue
     print(rid, len(t), flush=True)
     t['着'] = [fin.get((rid, n)) for n in t.index]
+    t['_ピックアップ'] = t.index.isin(views.picked(t).index)
     top3 = t['着'] <= 3
     for v in views.VIEWS:
         if f'{v}_順' in t and t[v].notna().any():
@@ -99,7 +100,7 @@ for c in sorted(cards, key=lambda c: c['race_id']):
 
 a = pd.concat(rows)
 a = a[a['着'].notna()]
-pk = (a['ピックアップフラグ数'] >= views.PICKUP_MIN) | ((a['人気'] >= 4) & (a['ピックアップフラグ数'] >= views.PICKUP_MIN - 1))
+pk = a['_ピックアップ']
 wn = (a['人気'] <= views.CAUTION_POP) & (a['凡走フラグ数'] >= views.CAUTION_MIN)
 lo, p5 = a['人気'] >= 4, a['人気'] <= views.CAUTION_POP
 

@@ -8,13 +8,16 @@
     市場なし             オッズを使わないモデルの3着内確率（能力だけの評価。レース内の合計を3に揃える）
     指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）
     指数・最高           同じく過去最高値（能力の天井）
-    上がり指数・近3走    上がり3Fを同じく補正したものの直近3走平均
     市場の見込み         単勝・複勝オッズとレースの形から見た、市場の3着内見込み
     前走パフォーマンス   前走のレースレベル − 勝ち馬との差（race_level）
     能力                 過去2年の対戦をつないだ地力（race_level）
     対戦比較             直接・間接の対戦から見た、他の馬に先着する確率の平均（h2h）
 
 人気4番以下なのに、どれかの目線で3番手以内に入った馬を「人気の割に評価が高い」とする。
+
+上がり指数（上がり3Fを補正したものの直近3走平均）は目線から外した。市場の見込みに足しても
+上積みが小さく、指数の目線と一緒に入れると上積みが無くなる（2026-10-07、2026年で検証）。
+値は凡走フラグ（上がり指数がメンバー内で下位）の判定にだけ使う。
 
 全履歴を使う計算（指数・レースレベル・対戦比較）は重いので、1回目に作って
 プロセス内に控える。判定日ごとに作り直すのはレースレベルの解き直しだけ。
@@ -28,7 +31,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-VIEWS = ['市場あり', '市場なし', '指数・近3走', '指数・最高', '上がり指数・近3走',
+VIEWS = ['市場あり', '市場なし', '指数・近3走', '指数・最高',
          '市場の見込み', '前走パフォーマンス', '能力', '対戦比較']
 
 _CACHE: Dict[str, object] = {}
@@ -213,12 +216,14 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
 
     _add_flag_inputs(t, card, hist['info'], as_of, hs)
     fl, pk = flags.flop_flags(t), flags.pickup_flags(t)
-    t['凡走フラグ数'], t['ピックアップフラグ数'] = fl.sum(axis=1), pk.sum(axis=1)
+    t['凡走フラグ数'] = fl.sum(axis=1)
+    t['ピックアップ重み'] = flags.pickup_score(pk)
+    t['ピックアップ点'] = flags.pickup_points(t['ピックアップ重み'])
     t['凡走フラグ'] = [flags.describe(r, fl) for _, r in t.iterrows()]
     t['ピックアップフラグ'] = [flags.describe(r, pk) for _, r in t.iterrows()]
     base = t['市場の見込み'] if '市場の見込み' in t else pd.Series(
         market.top3_from_support(t['単勝'].to_numpy(float)), index=t.index)
-    t['補正スコア'] = flags.calibrated(base, t['ピックアップフラグ数'], t['凡走フラグ数'])
+    t['補正スコア'] = flags.calibrated(base, t['ピックアップ重み'], t['凡走フラグ数'])
 
     for v in VIEWS:
         if v in t:
@@ -253,21 +258,21 @@ def to_markdown(card: Dict, t: pd.DataFrame) -> str:
     head = (f"### [{card.get('start_time')}] {card['venue_name']}{card['race_num']}R "
             f"{card['race_name']}（{card.get('surface')}{card.get('distance')}m・{len(t)}頭）")
     L = [head, '', '**1. 全馬の一覧**（補正スコア順。確率はすべて3着内）', '',
-         '| 馬番 | 馬名 | 人気 | 単勝 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ | 凡走 | 印 |',
+         '| 馬番 | 馬名 | 人気 | 単勝 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ点 | 凡走 | 印 |',
          '|---|---|---|---|---|---|---|---|---|---|---|']
     for n, r in t.sort_values('補正スコア', ascending=False).iterrows():
         L.append(f"| {n} | {r['馬名']} | {int(r['人気'])} | {r['単勝']} | {pct(r.get('市場あり'))} | {pct(r.get('市場なし'))} | "
-                 f"{pct(r.get('市場の見込み'))} | {pct(r['補正スコア'])} | {int(r['ピックアップフラグ数'])} | "
+                 f"{pct(r.get('市場の見込み'))} | {pct(r['補正スコア'])} | {r['ピックアップ点']:.1f} | "
                  f"{int(r['凡走フラグ数'])} | {r['印']} |")
     L += ['', '**2. 目線ごとのランキング**', '',
           '| 目線 | 平均 | 標準偏差 | 1番手 | 2番手 | 3番手 |', '|---|---|---|---|---|---|']
     for _, r in top3_table(t).iterrows():
         L.append(f"| {r['目線']} | {r['平均']} | {r['標準偏差']} | {r.get('1番手', '')} | "
                  f"{r.get('2番手', '')} | {r.get('3番手', '')} |")
-    pick = t[(t['ピックアップフラグ数'] >= PICKUP_MIN) | ((t['人気'] >= 4) & (t['ピックアップフラグ数'] >= PICKUP_MIN - 1))]
-    L += ['', f'**3. ピックアップ**（フラグ{PICKUP_MIN}個以上、人気4番以下は{PICKUP_MIN - 1}個以上）', '']
-    for n, r in pick.sort_values(['ピックアップフラグ数', '人気'], ascending=[False, True]).iterrows():
-        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{int(r['ピックアップフラグ数'])}個）：{r['ピックアップフラグ']}")
+    pick = picked(t)
+    L += ['', '**3. ピックアップ**（指数(最高)がメンバー内で上位、かつ指数(近3走)がトップに近い）', '']
+    for n, r in pick.sort_values('人気').iterrows():
+        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気）")
     if pick.empty:
         L.append('- 該当なし')
     warn = t[(t['人気'] <= CAUTION_POP) & (t['凡走フラグ数'] >= CAUTION_MIN)]
@@ -279,7 +284,11 @@ def to_markdown(card: Dict, t: pd.DataFrame) -> str:
     return '\n'.join(L)
 
 
-PICKUP_MIN = 4
-"""ピックアップに載せるフラグの数。人気4番以下は1つ少なくてよい（フラグ3個で3着内16%、0個の倍近い）。"""
+def picked(t: pd.DataFrame) -> pd.DataFrame:
+    """ピックアップリストに載る馬（指数のピックアップが両方立った馬）。"""
+    from . import flags
+    return t[t['ピックアップ重み'] >= flags.PICKUP_LIST_MIN - 1e-9]
+
+
 CAUTION_POP, CAUTION_MIN = 5, 4
 """要注意に載せる人気の範囲とフラグの数（1〜3番人気でフラグ4個なら凡走率35〜37%）。"""

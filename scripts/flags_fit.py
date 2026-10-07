@@ -141,14 +141,10 @@ PICK = {
     '前走 人気より着順が良い': d['p1_gap_v'] <= T['pick_p1_gap'],
 }
 d['n_flop'] = pd.DataFrame({k: v.fillna(False) for k, v in FLOP.items()}).sum(axis=1)
-d['n_pick'] = pd.DataFrame({k: v.fillna(False) for k, v in PICK.items()}).sum(axis=1)
-for title, m in (('人気4番以下', d['pop'] >= 4), ('全馬', d['pop'] >= 1)):
-    print(f'\n【ピックアップフラグの数ごとの3着内率】{title}')
-    for lab, mm in (('〜2024', old), ('2025〜', ~old)):
-        x = d[m & mm]; t = x.groupby(x['n_pick'].clip(upper=5))['hit'].agg(['mean', 'size'])
-        print(f'  {lab}: ' + '  '.join(f"{int(k)}{'個以上' if k == 5 else '個'} {r['mean'] * 100:4.1f}%({int(r['size']):,})" for k, r in t.iterrows()))
+for k, v in PICK.items():
+    d[k] = v.fillna(False).astype(float)
 
-# 補正スコア：市場の見込みを、フラグの数で補正する（2022〜2024で重みを決め、2025〜で評価）
+# 市場の見込み（2022年以降）
 o = store.read_table('odds'); o['race_id'] = o['race_id'].astype(str)
 mk = []
 for rid, g in o.groupby('race_id'):
@@ -158,22 +154,38 @@ for rid, g in o.groupby('race_id'):
 d = d.merge(pd.concat(mk), on=['race_id', 'horse_number'], how='left')
 e = d.dropna(subset=['mkt'])
 lgt = lambda p: np.log(np.clip(p, 1e-4, .9999) / (1 - np.clip(p, 1e-4, .9999)))
-Xs = lambda x: np.column_stack([lgt(x['mkt']), x['n_pick'], x['n_flop']])
 tr, te = e[e['year'] <= 2024], e[e['year'] >= 2025]
-cal = LogisticRegression().fit(Xs(tr), tr['hit'])
-print('\n補正スコアの式: 切片 %.4f / 市場の見込み(logit) %.4f / ピックアップ1個あたり %+.4f / 凡走1個あたり %+.4f'
-      % (cal.intercept_[0], *cal.coef_[0]))
+
+# ピックアップ候補1つずつの重さ。単独で効いて見えても、市場の見込みと他の候補を入れると
+# ほとんど残らないものがある（2026-10-07: 残ったのは指数の2つだけ）
+full = LogisticRegression(C=1e4, max_iter=2000).fit(
+    np.column_stack([lgt(tr['mkt'])] + [tr[k] for k in PICK]), tr['hit'])
+print('\n【ピックアップ候補の重さ】市場の見込みと全候補を入れたときの係数（logit）')
+for k, b in sorted(zip(PICK, full.coef_[0][1:]), key=lambda x: -x[1]):
+    print(f'  {k:22s} {b:+.3f}')
+USED = ['指数(最高)がメンバー内で上位', '指数(近3走)がトップに近い']
+
+# 補正スコア：市場の見込み＋使うピックアップ（それぞれの重み）＋凡走フラグの数
+Xs = lambda x: np.column_stack([lgt(x['mkt'])] + [x[k] for k in USED] + [x['n_flop']])
+cal = LogisticRegression(C=1e4, max_iter=2000).fit(Xs(tr), tr['hit'])
+c = cal.coef_[0]
+print('\n補正スコアの式: 切片 %.4f / 市場の見込み(logit) %.4f / %s / 凡走1個あたり %+.4f'
+      % (cal.intercept_[0], c[0], ' / '.join(f'{k} {w:+.4f}' for k, w in zip(USED, c[1:-1])), c[-1]))
 p_cal, p_mkt = cal.predict_proba(Xs(te))[:, 1], te['mkt'].to_numpy()
 print(f"2025〜 市場の見込みだけ: 対数損失 {log_loss(te['hit'], p_mkt):.4f} AUC {roc_auc_score(te['hit'], p_mkt):.4f}"
       f"  →  補正スコア: 対数損失 {log_loss(te['hit'], p_cal):.4f} AUC {roc_auc_score(te['hit'], p_cal):.4f}")
+lo = te[te['pop'] >= 4]
+print('2025〜 人気4番以下（指数のピックアップの立ち方ごと。3着内率 / 市場の見込み）')
+for (a, b), g in lo.groupby([lo[USED[0]], lo[USED[1]]]):
+    print(f"  指数(最高){'○' if a else '×'} 指数(近3走){'○' if b else '×'}  {len(g):>6,}頭  "
+          f"{g['hit'].mean() * 100:4.1f}% / {g['mkt'].mean() * 100:4.1f}%")
 te = te.assign(cal=p_cal)
 for k in ('mkt', 'cal'):
     te[f'{k}_rank'] = te.groupby('race_id')[k].rank(ascending=False, method='first')
-print('2025〜 レース内1位の3着内率: 市場の見込み %.1f%% / 補正スコア %.1f%%  （上位3頭が全員3着内: %.1f%% / %.1f%%）' % (
-    te[te['mkt_rank'] == 1]['hit'].mean() * 100, te[te['cal_rank'] == 1]['hit'].mean() * 100,
-    (te[te['mkt_rank'] <= 3].groupby('race_id')['hit'].sum() == 3).mean() * 100,
-    (te[te['cal_rank'] <= 3].groupby('race_id')['hit'].sum() == 3).mean() * 100))
+print('2025〜 レース内1位の3着内率: 市場の見込み %.1f%% / 補正スコア %.1f%%' % (
+    te[te['mkt_rank'] == 1]['hit'].mean() * 100, te[te['cal_rank'] == 1]['hit'].mean() * 100))
 import json
-json.dump({'thresholds': T, 'calibration': [float(cal.intercept_[0])] + [float(c) for c in cal.coef_[0]]},
+json.dump({'thresholds': T, 'calibration': [float(cal.intercept_[0]), float(c[0]), float(c[-1])],
+           'pick_weights': dict(zip(USED, map(float, c[1:-1])))},
           open(sys.argv[1] if len(sys.argv) > 1 else 'flags_fit.json', 'w'), ensure_ascii=False, indent=1)
 print(f'\n合計 {time.time() - t0:.0f}秒')

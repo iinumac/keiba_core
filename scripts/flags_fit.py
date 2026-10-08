@@ -141,7 +141,7 @@ PICK = {
     '前走 人気より着順が良い': d['p1_gap_v'] <= T['pick_p1_gap'],
 }
 d['n_flop'] = pd.DataFrame({k: v.fillna(False) for k, v in FLOP.items()}).sum(axis=1)
-for k, v in PICK.items():
+for k, v in {**PICK, **FLOP}.items():
     d[k] = v.fillna(False).astype(float)
 
 # 市場の見込み（2022年以降）
@@ -165,11 +165,33 @@ for k, b in sorted(zip(PICK, full.coef_[0][1:]), key=lambda x: -x[1]):
     print(f'  {k:22s} {b:+.3f}')
 USED = ['指数(最高)がメンバー内で上位', '指数(近3走)がトップに近い']
 
-# 補正スコア：市場の見込み＋使うピックアップ（それぞれの重み）＋凡走フラグの数
-Xs = lambda x: np.column_stack([lgt(x['mkt'])] + [x[k] for k in USED] + [x['n_flop']])
+# 凡走フラグの重さ。1〜5番人気が6着以下になるかを、市場の見込み・ピックアップ・凡走候補で当てる。
+# 指数(近3走)がトップから離れている（指数(最高)と重なる）・昇級・前走 人気より着順が悪い は
+# 重みがほぼ残らなかったので外した（2026-10-08）
+FLOP_USED = ['休み明け', '上がり指数(近3走)がメンバー内で下位', '芝ダ替わり', '先行型',
+             '複勝の支持が単勝の見込みより低い', '前走 位置の割に上がりが遅い', '指数(最高)がメンバー内で下位']
+fav_tr = tr[tr['pop'] <= 5]
+fm = LogisticRegression(C=1e4, max_iter=2000).fit(
+    np.column_stack([lgt(fav_tr['mkt'])] + [fav_tr[k] for k in USED + FLOP_USED]), fav_tr['flop'])
+FLOP_W = dict(zip(FLOP_USED, fm.coef_[0][1 + len(USED):]))
+print('\n【凡走フラグの重さ】1〜5番人気の6着以下（logit）')
+for k, w in sorted(FLOP_W.items(), key=lambda x: -x[1]):
+    print(f'  {k:24s} {w:+.3f}')
+for x in (tr, te):
+    x['flop_score'] = sum(x[k] * w for k, w in FLOP_W.items())
+top_w = max(FLOP_W.values())
+fav_te = te[te['pop'] <= 5]
+pts = (fav_te['flop_score'] / top_w).round(1)
+print('2025〜 1〜5番人気：凡走点（いちばん重いフラグ=1点）ごとの6着以下率')
+for lo_, hi_ in ((0, .5), (.5, 1.5), (1.5, 2.5), (2.5, 3.0), (3.0, 3.5), (3.5, 4.0), (4.0, 99)):
+    g = fav_te[(pts >= lo_) & (pts < hi_)]
+    print(f'  {lo_:.1f}〜{hi_:.1f}点 {len(g):>6,}頭 {g["flop"].mean() * 100:4.1f}%')
+
+# 補正スコア：市場の見込み＋使うピックアップ（それぞれの重み）＋凡走の重みの合計
+Xs = lambda x: np.column_stack([lgt(x['mkt'])] + [x[k] for k in USED] + [x['flop_score']])
 cal = LogisticRegression(C=1e4, max_iter=2000).fit(Xs(tr), tr['hit'])
 c = cal.coef_[0]
-print('\n補正スコアの式: 切片 %.4f / 市場の見込み(logit) %.4f / %s / 凡走1個あたり %+.4f'
+print('\n補正スコアの式: 切片 %.4f / 市場の見込み(logit) %.4f / %s / 凡走の重みの合計 %+.4f'
       % (cal.intercept_[0], c[0], ' / '.join(f'{k} {w:+.4f}' for k, w in zip(USED, c[1:-1])), c[-1]))
 p_cal, p_mkt = cal.predict_proba(Xs(te))[:, 1], te['mkt'].to_numpy()
 print(f"2025〜 市場の見込みだけ: 対数損失 {log_loss(te['hit'], p_mkt):.4f} AUC {roc_auc_score(te['hit'], p_mkt):.4f}"
@@ -186,6 +208,7 @@ print('2025〜 レース内1位の3着内率: 市場の見込み %.1f%% / 補正
     te[te['mkt_rank'] == 1]['hit'].mean() * 100, te[te['cal_rank'] == 1]['hit'].mean() * 100))
 import json
 json.dump({'thresholds': T, 'calibration': [float(cal.intercept_[0]), float(c[0]), float(c[-1])],
-           'pick_weights': dict(zip(USED, map(float, c[1:-1])))},
+           'pick_weights': dict(zip(USED, map(float, c[1:-1]))),
+           'flop_weights': {k: float(w) for k, w in FLOP_W.items()}},
           open(sys.argv[1] if len(sys.argv) > 1 else 'flags_fit.json', 'w'), ensure_ascii=False, indent=1)
 print(f'\n合計 {time.time() - t0:.0f}秒')

@@ -851,7 +851,7 @@ def test_views():
     t['上位の目線の数'] = (t[['市場あり_順', '指数・近3走_順']] <= 3).sum(axis=1)
     t['人気の割に評価が高い'] = (t['人気'] >= 4) & (t['上位の目線の数'] > 0)
     t = t.assign(単勝=[2.0, 4.0, 6.0, 10.0, 30.0], 補正スコア=[.6, .5, .4, .3, .2],
-                 ピックアップ重み=[0, .0255, 0, .0992, .1247], ピックアップ点=[0, .3, 0, 1.0, 1.3], 凡走フラグ数=[4, 0, 1, 0, 0],
+                 ピックアップ重み=[0, .0381, 0, .0973, .1354], ピックアップ点=[0, .4, 0, 1.0, 1.4], 凡走点=[3.2, 0, 2.6, 0, 0],
                  ピックアップフラグ=['', '', '', '', '指数(最高)がメンバー内で上位'], 凡走フラグ=['芝ダ替わり', '', '', '', ''])
     top = views.top3_table(t)
     check('目線ごとに3頭', list(top['目線']) == ['市場あり', '指数・近3走'], f"{list(top['目線'])}")
@@ -860,7 +860,8 @@ def test_views():
     check('全馬の一覧がある', '1. 全馬の一覧' in md and '| 5 | E |' in md)
     picks = md.split('3. ピックアップ')[1].split('4. 要注意')[0]
     check('ピックアップには指数のフラグが両方立った馬だけ載る', '5 E（7人気）' in picks and '4 D' not in picks)
-    check('要注意に凡走フラグの多い人気馬が載る', '1 A（1人気・4個）' in md.split('4. 要注意')[1])
+    warn = md.split('4. 要注意')[1]
+    check('要注意に凡走点の高い人気馬が載る', '1 A（1人気・3.2点）' in warn and '3 C（3人気・2.6点）' in warn)
     d = views.deviation(pd.Series([1.0, 2.0, 3.0, 4.0, 5.0]))
     check('偏差値は平均が50', abs(d.mean() - 50) < 1e-9)
     check('偏差値は標準偏差1つぶんが10', abs(d.iloc[-1] - (50 + 10 * 2 / pd.Series([1, 2, 3, 4, 5]).std())) < 1e-9)
@@ -880,15 +881,18 @@ def test_flags():
     check('ピックアップは指数の2つ', list(pk.columns) == list(flags.PICK_WEIGHTS))
     sc = flags.pickup_score(pk)
     check('重みの合計はリストの境目に届く', sc.iloc[0] >= flags.PICKUP_LIST_MIN - 1e-9 and sc.iloc[1] == 0)
-    check('表示の点数は指数(最高)が1点', list(flags.pickup_points([0.0992, 0.0255])) == [1.0, 0.3])
+    check('表示の点数は指数(最高)が1点', list(flags.pickup_points(list(flags.PICK_WEIGHTS.values()))) == [1.0, 0.4])
     check('悪材料の馬は凡走フラグが全部立つ', fl.iloc[1].all(), f'{fl.iloc[1].sum()}/{len(fl.columns)}')
     check('好材料の馬に凡走フラグは立たない', not fl.iloc[0].any())
     empty = pd.DataFrame(index=[0])
     check('値が無ければフラグは立たない', not flags.pickup_flags(empty).any(axis=None) and not flags.flop_flags(empty).any(axis=None))
-    c = flags.calibrated([0.3, 0.3, 0.3], [0, flags.PICKUP_LIST_MIN, 0], [0, 0, 5])
+    check('凡走フラグは7つ', list(fl.columns) == list(flags.FLOP_WEIGHTS))
+    check('凡走点はいちばん重いフラグが1点', flags.flop_points([max(flags.FLOP_WEIGHTS.values())])[0] == 1.0)
+    c = flags.calibrated([0.3, 0.3, 0.3], [0, flags.PICKUP_LIST_MIN, 0], [0, 0, flags.flop_score(fl).iloc[1]])
     check('ピックアップがあると補正スコアが上がる', c[1] > c[0])
     check('凡走フラグが多いと補正スコアが下がる', c[2] < c[0])
-    check('補正は小さい（市場の見込みから数pt以内）', abs(c[1] - 0.3) < 0.05 and abs(c[2] - 0.3) < 0.05, f'{c}')
+    # 凡走フラグが7つ全部立っても −5pt ほど。ピックアップ両方で +3pt ほど
+    check('補正は小さい（市場の見込みから6pt以内）', abs(c[1] - 0.3) < 0.06 and abs(c[2] - 0.3) < 0.06, f'{c}')
 
 
 def test_merge_cards():

@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 
 import pandas as pd
 
-from keiba import store, views
+from keiba import flags, store, views
 
 args = sys.argv[1:]
 if not args:
@@ -73,6 +73,7 @@ for c in sorted(cards, key=lambda c: c['race_id']):
     print(rid, len(t), flush=True)
     t['着'] = [fin.get((rid, n)) for n in t.index]
     t['_ピックアップ'] = t.index.isin(views.picked(t).index)
+    t['_要注意'] = t.index.isin(views.cautioned(t).index)
     top3 = t['着'] <= 3
     for v in views.VIEWS:
         if f'{v}_順' in t and t[v].notna().any():
@@ -89,7 +90,7 @@ for c in sorted(cards, key=lambda c: c['race_id']):
         elif s.startswith('| ') and len(cells) == 13 and cells[1].strip().isdigit():
             f = t.loc[int(cells[1]), '着']
             lines[i] = s + (f' **{int(f)}** |' if f <= 3 else f' {int(f)} |' if pd.notna(f) else ' 取消 |')
-        elif s.startswith('- ') and '人気・' in s:
+        elif s.startswith('- ') and s[2:].split()[0].isdigit():
             f = t.loc[int(s[2:].split()[0]), '着']
             if pd.notna(f):
                 lines[i] = s + (f'　→ **{int(f)}着**' if f <= 3 else f'　→ {int(f)}着')
@@ -101,8 +102,8 @@ for c in sorted(cards, key=lambda c: c['race_id']):
 a = pd.concat(rows)
 a = a[a['着'].notna()]
 pk = a['_ピックアップ']
-wn = (a['人気'] <= views.CAUTION_POP) & (a['凡走フラグ数'] >= views.CAUTION_MIN)
-lo, p5 = a['人気'] >= 4, a['人気'] <= views.CAUTION_POP
+wn = a['_要注意']
+lo, p5 = a['人気'] >= 4, a['人気'] <= flags.CAUTION_POP
 
 
 def rate(mask, col):
@@ -114,7 +115,7 @@ S += [f'| {v} | {h}/{n}（{h / n * 100:.0f}%） |' for v, (n, h) in stats.items(
 S += ['', '| | 該当 | 該当しない |', '|---|---|---|',
       f"| ピックアップ（人気4番以下）の3着内率 | {rate(lo & pk, 'top3')} | {rate(lo & ~pk, 'top3')} |",
       f"| ピックアップ（1〜3番人気）の3着内率 | {rate(~lo & pk, 'top3')} | {rate(~lo & ~pk, 'top3')} |",
-      f"| 要注意（{views.CAUTION_POP}番人気以内）の6着以下率 | {rate(wn, 'flop')} | {rate(p5 & ~wn, 'flop')} |"]
+      f"| 要注意（{flags.CAUTION_POP}番人気以内）の6着以下率 | {rate(wn, 'flop')} | {rate(p5 & ~wn, 'flop')} |"]
 out = ROOT / 'reports' / f'{day.isoformat()}_views.md'
 out.parent.mkdir(exist_ok=True)
 out.write_text(f'# {day.isoformat()} 全{len(rows)}レース 目線の評価\n\n'

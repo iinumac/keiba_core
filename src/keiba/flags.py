@@ -6,8 +6,13 @@
 
 ## 凡走フラグ（1〜3番人気の6着以下が増える要素。境目は1〜3番人気で決めた）
 
-    1〜3番人気の凡走率   フラグ0個 21% → 5個以上 40〜43%
-    1番人気              フラグ0個 13〜15% → 5個以上 29〜34%
+候補は10あった。市場の見込みとほかの候補を入れたうえで、指数(近3走)がトップから離れている
+（指数(最高)と重なる）・昇級・前走 人気より着順が悪い は重みがほぼ残らなかったので外した
+（2026-10-08）。残りの7つは重みがそれぞれ違うので、重み（FLOP_WEIGHTS）の合計を使う。
+重みは1〜5番人気が6着以下になるかで決めた。
+
+    1〜5番人気（2025年以降）  凡走点   0〜0.5  0.5〜1.5  1.5〜2.5  2.5〜3  3〜3.5  3.5〜
+                              6着以下   31%      35%       41%      45%     47%    52%
 
 ## ピックアップフラグ（人気4番以下の3着内が増える要素。境目は人気4番以下で決めた）
 
@@ -24,9 +29,9 @@
 
 ## 補正スコア
 
-市場の見込み（market.market_top3）を、ピックアップの重みと凡走フラグの数で補正した3着内確率。
+市場の見込み（market.market_top3）を、ピックアップの重みと凡走の重みで補正した3着内確率。
 フラグの多くは市場もオッズに織り込んでいるので、補正は小さい
-（2025年以降で 対数損失 0.3996→0.3990、AUC 0.8198→0.8206）。
+（2025年以降で 対数損失 0.3996→0.3991、AUC 0.8198→0.8205）。
 フラグの役割は、数字の理由を人に説明するリストとして見せること。
 """
 
@@ -45,14 +50,19 @@ T = {
 }
 """境目。指数は1000mあたり秒、順位はメンバー内、休養は日数。"""
 
-PICK_WEIGHTS = {'指数(最高)がメンバー内で上位': 0.0992, '指数(近3走)がトップに近い': 0.0255}
+PICK_WEIGHTS = {'指数(最高)がメンバー内で上位': 0.0973, '指数(近3走)がトップに近い': 0.0381}
 """ピックアップの重み（logit）。補正スコアの式の係数そのもの。"""
 
-CALIBRATION = (0.0094, 0.9730, -0.0302)
-"""補正スコア = logistic(切片 + a·logit(市場の見込み) + ピックアップの重みの合計 + c·凡走数)。"""
+FLOP_WEIGHTS = {'上がり指数(近3走)がメンバー内で下位': 0.1678, '芝ダ替わり': 0.1669, '休み明け': 0.1416,
+                '先行型': 0.1283, '複勝の支持が単勝の見込みより低い': 0.1110,
+                '前走 位置の割に上がりが遅い': 0.0991, '指数(最高)がメンバー内で下位': 0.0752}
+"""凡走の重み（1〜5番人気が6着以下になる logit への上乗せ）。"""
 
-COLUMNS = ['fig_best_rank', 'l3fig_r3_rank', 'fig_r3_gap', 'fig_p1', 'style', 'p1_l3f_vs_pos',
-           'days_since_last', 'surface_change', 'level_up', 'p1_gap', 'prev_fin', 'p1_spread5', 'place_vs_win']
+CALIBRATION = (-0.0010, 0.9739, -0.3155)
+"""補正スコア = logistic(切片 + a·logit(市場の見込み) + ピックアップの重みの合計 + c·凡走の重みの合計)。"""
+
+COLUMNS = ['fig_best_rank', 'l3fig_r3_rank', 'fig_r3_gap', 'style', 'p1_l3f_vs_pos',
+           'days_since_last', 'surface_change', 'place_vs_win']
 """判定に使う列。どれも欠けていてよい（欠けていればフラグは立たない）。"""
 
 
@@ -61,20 +71,31 @@ def _c(t: pd.DataFrame, name: str) -> pd.Series:
 
 
 def flop_flags(t: pd.DataFrame) -> pd.DataFrame:
-    """凡走フラグ（True/False の表）。"""
+    """凡走フラグ（True/False の表）。列は FLOP_WEIGHTS の順。"""
     f = {
-        '指数(最高)がメンバー内で下位': _c(t, 'fig_best_rank') >= T['flop_fig_best_rank'],
         '上がり指数(近3走)がメンバー内で下位': _c(t, 'l3fig_r3_rank') >= T['flop_l3fig_rank'],
-        '指数(近3走)がトップから離れている': _c(t, 'fig_r3_gap') <= T['flop_fig_gap'],
         '芝ダ替わり': _c(t, 'surface_change') == 1,
-        '複勝の支持が単勝の見込みより低い': _c(t, 'place_vs_win') <= T['flop_place_vs_win'],
-        '先行型': _c(t, 'style') <= T['flop_style'],
-        '前走 位置の割に上がりが遅い': _c(t, 'p1_l3f_vs_pos') <= T['flop_p1_l3f'],
         '休み明け': _c(t, 'days_since_last') >= T['flop_rest'],
-        '昇級': _c(t, 'level_up') == 1,
-        '前走 人気より着順が悪い': _c(t, 'p1_gap') >= T['flop_p1_gap'],
+        '先行型': _c(t, 'style') <= T['flop_style'],
+        '複勝の支持が単勝の見込みより低い': _c(t, 'place_vs_win') <= T['flop_place_vs_win'],
+        '前走 位置の割に上がりが遅い': _c(t, 'p1_l3f_vs_pos') <= T['flop_p1_l3f'],
+        '指数(最高)がメンバー内で下位': _c(t, 'fig_best_rank') >= T['flop_fig_best_rank'],
     }
     return pd.DataFrame({k: v.fillna(False).astype(bool) for k, v in f.items()}, index=t.index)
+
+
+def flop_score(flags_table: pd.DataFrame) -> pd.Series:
+    """凡走の重みの合計（logit）。"""
+    return flags_table.astype(float) @ pd.Series(FLOP_WEIGHTS)[flags_table.columns]
+
+
+def flop_points(score) -> np.ndarray:
+    """表示用の凡走点。いちばん重いフラグを1点とする。"""
+    return np.round(np.asarray(score, float) / max(FLOP_WEIGHTS.values()), 1)
+
+
+CAUTION_POP, CAUTION_POINTS = 5, 2.5
+"""要注意リストに載せる人気の範囲と凡走点（1〜5番人気で凡走点2.5以上なら6着以下が45〜52%）。"""
 
 
 def pickup_flags(t: pd.DataFrame) -> pd.DataFrame:
@@ -92,7 +113,7 @@ def pickup_score(flags_table: pd.DataFrame) -> pd.Series:
 
 
 def pickup_points(score) -> np.ndarray:
-    """表示用の点数。いちばん重いフラグを1点とする（指数(最高)1.0、指数(近3走)0.3）。"""
+    """表示用の点数。いちばん重いフラグを1点とする（指数(最高)1.0、指数(近3走)0.4）。"""
     return np.round(np.asarray(score, float) / max(PICK_WEIGHTS.values()), 1)
 
 
@@ -100,11 +121,11 @@ PICKUP_LIST_MIN = sum(PICK_WEIGHTS.values())
 """ピックアップリストに載せる重みの合計。両方のフラグが立った馬だけ。"""
 
 
-def calibrated(market_top3, pick_score, n_flop) -> np.ndarray:
-    """補正スコア（3着内確率）。pick_score は pickup_score の値。"""
+def calibrated(market_top3, pick_score, flop_score_) -> np.ndarray:
+    """補正スコア（3着内確率）。pick_score / flop_score_ は pickup_score / flop_score の値。"""
     p = np.clip(np.asarray(market_top3, float), 1e-4, 0.9999)
     z = (CALIBRATION[0] + CALIBRATION[1] * np.log(p / (1 - p))
-         + np.asarray(pick_score, float) + CALIBRATION[2] * np.asarray(n_flop, float))
+         + np.asarray(pick_score, float) + CALIBRATION[2] * np.asarray(flop_score_, float))
     return 1 / (1 + np.exp(-z))
 
 

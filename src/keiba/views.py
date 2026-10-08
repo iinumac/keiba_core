@@ -216,14 +216,15 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
 
     _add_flag_inputs(t, card, hist['info'], as_of, hs)
     fl, pk = flags.flop_flags(t), flags.pickup_flags(t)
-    t['凡走フラグ数'] = fl.sum(axis=1)
+    t['凡走重み'] = flags.flop_score(fl)
+    t['凡走点'] = flags.flop_points(t['凡走重み'])
     t['ピックアップ重み'] = flags.pickup_score(pk)
     t['ピックアップ点'] = flags.pickup_points(t['ピックアップ重み'])
     t['凡走フラグ'] = [flags.describe(r, fl) for _, r in t.iterrows()]
     t['ピックアップフラグ'] = [flags.describe(r, pk) for _, r in t.iterrows()]
     base = t['市場の見込み'] if '市場の見込み' in t else pd.Series(
         market.top3_from_support(t['単勝'].to_numpy(float)), index=t.index)
-    t['補正スコア'] = flags.calibrated(base, t['ピックアップ重み'], t['凡走フラグ数'])
+    t['補正スコア'] = flags.calibrated(base, t['ピックアップ重み'], t['凡走重み'])
 
     for v in VIEWS:
         if v in t:
@@ -253,17 +254,19 @@ def top3_table(t: pd.DataFrame) -> pd.DataFrame:
 
 def to_markdown(card: Dict, t: pd.DataFrame) -> str:
     """表示用。全馬の一覧・目線ごとのランキング・ピックアップリスト・要注意リスト。"""
+    from . import flags
+
     def pct(x):
         return '—' if pd.isna(x) else f'{x * 100:.1f}%'
     head = (f"### [{card.get('start_time')}] {card['venue_name']}{card['race_num']}R "
             f"{card['race_name']}（{card.get('surface')}{card.get('distance')}m・{len(t)}頭）")
     L = [head, '', '**1. 全馬の一覧**（補正スコア順。確率はすべて3着内）', '',
-         '| 馬番 | 馬名 | 人気 | 単勝 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ点 | 凡走 | 印 |',
+         '| 馬番 | 馬名 | 人気 | 単勝 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ点 | 凡走点 | 印 |',
          '|---|---|---|---|---|---|---|---|---|---|---|']
     for n, r in t.sort_values('補正スコア', ascending=False).iterrows():
         L.append(f"| {n} | {r['馬名']} | {int(r['人気'])} | {r['単勝']} | {pct(r.get('市場あり'))} | {pct(r.get('市場なし'))} | "
                  f"{pct(r.get('市場の見込み'))} | {pct(r['補正スコア'])} | {r['ピックアップ点']:.1f} | "
-                 f"{int(r['凡走フラグ数'])} | {r['印']} |")
+                 f"{r['凡走点']:.1f} | {r['印']} |")
     L += ['', '**2. 目線ごとのランキング**', '',
           '| 目線 | 平均 | 標準偏差 | 1番手 | 2番手 | 3番手 |', '|---|---|---|---|---|---|']
     for _, r in top3_table(t).iterrows():
@@ -275,10 +278,10 @@ def to_markdown(card: Dict, t: pd.DataFrame) -> str:
         L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気）")
     if pick.empty:
         L.append('- 該当なし')
-    warn = t[(t['人気'] <= CAUTION_POP) & (t['凡走フラグ数'] >= CAUTION_MIN)]
-    L += ['', f'**4. 要注意**（{CAUTION_POP}番人気以内で凡走フラグ{CAUTION_MIN}個以上）', '']
-    for n, r in warn.sort_values(['凡走フラグ数', '人気'], ascending=[False, True]).iterrows():
-        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{int(r['凡走フラグ数'])}個）：{r['凡走フラグ']}")
+    warn = cautioned(t)
+    L += ['', f'**4. 要注意**（{flags.CAUTION_POP}番人気以内で凡走点{flags.CAUTION_POINTS}以上）', '']
+    for n, r in warn.sort_values(['凡走点', '人気'], ascending=[False, True]).iterrows():
+        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{r['凡走点']:.1f}点）：{r['凡走フラグ']}")
     if warn.empty:
         L.append('- 該当なし')
     return '\n'.join(L)
@@ -290,5 +293,7 @@ def picked(t: pd.DataFrame) -> pd.DataFrame:
     return t[t['ピックアップ重み'] >= flags.PICKUP_LIST_MIN - 1e-9]
 
 
-CAUTION_POP, CAUTION_MIN = 5, 4
-"""要注意に載せる人気の範囲とフラグの数（1〜3番人気でフラグ4個なら凡走率35〜37%）。"""
+def cautioned(t: pd.DataFrame) -> pd.DataFrame:
+    """要注意リストに載る馬（上位人気で凡走点が高い馬）。"""
+    from . import flags
+    return t[(t['人気'] <= flags.CAUTION_POP) & (t['凡走点'] >= flags.CAUTION_POINTS - 1e-9)]

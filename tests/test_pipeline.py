@@ -851,7 +851,7 @@ def test_views():
     t['上位の目線の数'] = (t[['市場あり_順', '指数・近3走_順']] <= 3).sum(axis=1)
     t['人気の割に評価が高い'] = (t['人気'] >= 4) & (t['上位の目線の数'] > 0)
     t = t.assign(単勝=[2.0, 4.0, 6.0, 10.0, 30.0], 補正スコア=[.6, .5, .4, .3, .2],
-                 ピックアップ重み=[0, .0381, 0, .0973, .1354], ピックアップ点=[0, .4, 0, 1.0, 1.4], 凡走点=[3.2, 0, 2.6, 0, 0], 脚質=['先行', '差し', '', '追込', '中団'],
+                 ピックアップ重み=[0, .0576, 0, .1113, .1689], ピックアップ点=[0, .5, 0, 1.0, 1.5], 凡走点=[3.2, 0, 2.6, 0, 0], 脚質=['先行', '差し', '', '追込', '中団'],
                  ピックアップフラグ=['', '', '', '', '指数(最高)がメンバー内で上位'], 凡走フラグ=['芝ダ替わり', '', '', '', ''])
     top = views.top3_table(t)
     check('目線ごとに3頭', list(top['目線']) == ['市場あり', '指数・近3走'], f"{list(top['目線'])}")
@@ -868,6 +868,16 @@ def test_views():
                        'surface': ['ダート', 'ダート', 'ダート', '芝', 'ダート', 'ダート', '芝'],
                        'distance': [1200, 1800, 1800, 1800, 1200, 1150, 1800],
                        'figure': [1.373, 0.2, 0.3, 2.0, 0.9, 0.7, 1.0], 'l3f_figure': [0.0] * 7})
+    # 距離の変換：距離帯が1つ離れるごとに元の指数の効きが半分になる係数で試す
+    steps = [{'surface': sf, 'step': k, 'n': 1000, 'a': 0.0, 'b': 0.5 ** abs(k), 'sd': 0.5, 'r': 0.5}
+             for sf in ('芝', 'ダート') for k in range(-6, 7)]
+    views._CACHE['transfer'] = {c: {'cell': [], 'step': steps} for c in ('figure', 'l3f_figure')}
+    fc = views._figure_summary(fg, ['a', 'c'], '2026-10-10', surface='ダート', distance=1800)
+    check('距離の変換：遠い距離の指数は割り引かれ、最高は1800mの走り',
+          abs(fc.loc['a', '指数・最高'] - 0.3) < 1e-9 and abs(fc.loc['a', '指数・近3走'] - (1.373 / 8 + 0.5) / 3) < 1e-9,
+          f"{fc.loc['a'].to_dict()}")
+    check('距離の変換：同じ芝ダの過去走が無ければ空欄', 'c' not in fc.index or pd.isna(fc.loc['c', '指数・最高']))
+    views._CACHE['transfer'] = None   # 係数が無いときの ±400m
     fs = views._figure_summary(fg, ['a', 'b', 'c'], '2026-10-10', surface='ダート', distance=1800)
     check('指数は同じ芝ダ・近い距離の過去走だけ（短距離・芝の指数を拾わない）',
           abs(fs.loc['a', '指数・最高'] - 0.3) < 1e-9 and abs(fs.loc['a', '指数・近3走'] - 0.25) < 1e-9,
@@ -876,6 +886,7 @@ def test_views():
     check('同じ芝ダの過去走が無ければ空欄', 'c' not in fs.index or pd.isna(fs.loc['c', '指数・最高']))
     fa = views._figure_summary(fg, ['a'], '2026-10-10')
     check('芝ダが分からなければ全過去走', abs(fa.loc['a', '指数・最高'] - 2.0) < 1e-9)
+    views._CACHE.pop('transfer', None)
     closers = md.split('5. 差し・追込型')[1]
     check('差し・追込型のリストは補正スコア順', closers.index('2 B') < closers.index('4 D') and '1 A' not in closers)
     info = pd.DataFrame({'horse_id': ['h1'] * 3 + ['h2'] * 3 + ['h3'] * 2,
@@ -902,7 +913,7 @@ def test_flags():
     check('ピックアップは指数の2つ', list(pk.columns) == list(flags.PICK_WEIGHTS))
     sc = flags.pickup_score(pk)
     check('重みの合計はリストの境目に届く', sc.iloc[0] >= flags.PICKUP_LIST_MIN - 1e-9 and sc.iloc[1] == 0)
-    check('表示の点数は指数(最高)が1点', list(flags.pickup_points(list(flags.PICK_WEIGHTS.values()))) == [1.0, 0.4])
+    check('表示の点数は指数(最高)が1点', list(flags.pickup_points(list(flags.PICK_WEIGHTS.values()))) == [1.0, 0.5])
     check('悪材料の馬は凡走フラグが全部立つ', fl.iloc[1].all(), f'{fl.iloc[1].sum()}/{len(fl.columns)}')
     check('好材料の馬に凡走フラグは立たない', not fl.iloc[0].any())
     empty = pd.DataFrame(index=[0])

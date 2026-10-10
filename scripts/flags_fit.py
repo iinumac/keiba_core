@@ -26,6 +26,12 @@ races, results = store.load_for_features()
 df = build_features(races, results, C04_CONFIG)
 df['race_id'] = df['race_id'].astype(str)
 fig = figure.add_horse_figure_features(figure.add_figures(results, races)); fig['race_id'] = fig['race_id'].astype(str)
+# 近3走・最高・上がりは、過去走を今回の距離に変換してから集計したもの（views と同じ。figure.converted_summary）
+conv = figure.converted_summary(fig[['horse_id', 'race_date', 'surface', 'distance']], fig, figure.load_transfer())
+for c in ('fig_r3', 'fig_best', 'l3fig_r3'):
+    fig[c] = conv[c].to_numpy()
+    fig[f'{c}_rank'] = fig.groupby('race_id')[c].rank(ascending=False, method='min')
+    fig[f'{c}_gap'] = fig[c] - fig.groupby('race_id')[c].transform('max')
 pc = pace.add_horse_pace_features(results, races); pc['race_id'] = pc['race_id'].astype(str)
 df = df.merge(fig[['race_id', 'horse_number', 'fig_r3', 'fig_r3_rank', 'fig_r3_gap', 'fig_best_rank', 'l3fig_r3_rank', 'fig_p1']],
               on=['race_id', 'horse_number'], how='left')

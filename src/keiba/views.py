@@ -6,8 +6,8 @@
     目線                 何を見ているか
     市場あり             買い目用モデルの3着内確率（オッズ込みの総合評価）
     市場なし             オッズを使わないモデルの3着内確率（能力だけの評価。レース内の合計を3に揃える）
-    指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）。指数はどれも、今回と
-                         芝・ダートが同じで距離が±400m以内の過去走から出す（_figure_summary）
+    指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）。指数はどれも、同じ
+                         芝・ダートの過去走を今回の距離に変換してから出す（_figure_summary）
     指数・最高           同じく過去最高値（能力の天井）
     市場の見込み         単勝・複勝オッズとレースの形から見た、市場の3着内見込み
     前走パフォーマンス   前走のレースレベル − 勝ち馬との差（race_level）
@@ -95,24 +95,35 @@ def _free_model():
 
 
 FIGURE_DISTANCE_RANGE = 400
-"""指数を集計する過去走の距離の幅（今回の距離 ± この値）。"""
+"""距離の変換の係数が無いときに使う、過去走の距離の幅（今回の距離 ± この値）。"""
 
 
 def _figure_summary(fig: pd.DataFrame, horse_ids: List[str], as_of,
                     surface=None, distance=None) -> pd.DataFrame:
-    """指数（近3走平均・最高・上がり近3走平均）。今回と条件の近い過去走だけで出す。
+    """指数（近3走平均・最高・上がり近3走平均）。過去走を今回の距離に変換してから集計する。
 
-    全過去走から取ると、ダート1800m戦で1年前のダート1200mの指数が「最高」として拾われる
+    全過去走をそのまま使うと、ダート1800m戦で1年前のダート1200mの指数が「最高」として拾われる
     （2026-10-10 京都7R アーデルリーベ: ダート1800mの指数は0.2〜0.3台なのに、
-    ダート1200mの1.373で指数・最高がメンバー1位、ピックアップに載った）。そこで
+    ダート1200mの1.373で指数・最高がメンバー1位、ピックアップに載った）。
 
-      1. 芝・ダートが同じ、かつ距離が ±FIGURE_DISTANCE_RANGE m 以内の過去走
-      2. 1が無い馬は、芝・ダートが同じ全距離の過去走
-      3. 同じ芝・ダートの過去走が無い馬（初芝・初ダート）は空欄
+    同じ芝ダの過去走を、figure.converted_summary で今回の距離での見込みに直す
+    （距離が離れた走りほど割り引かれる）。同じ芝ダの過去走が無い馬（初芝・初ダート）は空欄。
+    2025年以降で、全過去走・±400m に絞る方式より、レース内の3着内との関係も
+    市場に足したときの上積みも大きい（scripts/figure_transfer.py）。
 
-    の順で使う。surface が芝・ダートでない（障害など）か渡されないときは全過去走。
+    変換の係数（models/figure_transfer.json）が無ければ、同じ芝ダで ±FIGURE_DISTANCE_RANGE m 以内の
+    過去走（無ければ同じ芝ダの全距離）で集計する。surface が芝・ダートでない（障害など）か
+    渡されないときは全過去走をそのまま使う。
     """
+    from . import figure
     f = fig[fig['horse_id'].isin(horse_ids) & (fig['race_date'] < pd.Timestamp(as_of))]
+    cols = ['指数・近3走', '指数・最高', '上がり指数・近3走']
+    transfer = _transfer()
+    if surface in ('芝', 'ダート') and distance is not None and pd.notna(distance) and transfer:
+        tg = pd.DataFrame({'horse_id': horse_ids, 'race_date': pd.Timestamp(as_of),
+                           'surface': surface, 'distance': float(distance)}).drop_duplicates('horse_id')
+        c = figure.converted_summary(tg, f, transfer).set_index('horse_id')
+        return c[['fig_r3', 'fig_best', 'l3fig_r3']].set_axis(cols, axis=1)
     if surface in ('芝', 'ダート'):
         same = f[f['surface'] == surface]
         if distance is not None and pd.notna(distance):
@@ -122,9 +133,16 @@ def _figure_summary(fig: pd.DataFrame, horse_ids: List[str], as_of,
         f = same.sort_values(['horse_id', 'race_date'])
     g = f.groupby('horse_id')
     return pd.DataFrame({
-        '指数・近3走': g['figure'].apply(lambda x: x.dropna().tail(3).mean()),
-        '指数・最高': g['figure'].max(),
-        '上がり指数・近3走': g['l3f_figure'].apply(lambda x: x.dropna().tail(3).mean())})
+        cols[0]: g['figure'].apply(lambda x: x.dropna().tail(3).mean()),
+        cols[1]: g['figure'].max(),
+        cols[2]: g['l3f_figure'].apply(lambda x: x.dropna().tail(3).mean())})
+
+
+def _transfer():
+    if 'transfer' not in _CACHE:
+        from . import figure
+        _CACHE['transfer'] = figure.load_transfer()
+    return _CACHE['transfer']
 
 
 PERCENT_VIEWS = {'市場あり', '市場なし', '市場の見込み', '対戦比較'}

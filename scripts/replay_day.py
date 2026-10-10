@@ -117,7 +117,7 @@ for c in sorted(cards, key=lambda c: c['race_id']):
         cells = s.split('|')
         if s.startswith('| 馬番 |'):
             lines[i] = s + ' 着 |'; lines[i + 1] += '---|'
-        elif s.startswith('| ') and len(cells) == 13 and cells[1].strip().isdigit():
+        elif s.startswith('| ') and len(cells) >= 13 and cells[1].strip().isdigit():
             f = t.loc[int(cells[1]), '着']
             lines[i] = s + (f' **{int(f)}** |' if f <= 3 else f' {int(f)} |' if pd.notna(f) else ' 取消 |')
         elif s.startswith('- ') and s[2:].split()[0].isdigit():
@@ -146,7 +146,7 @@ S += ['', '| | 該当 | 該当しない |', '|---|---|---|',
       f"| ピックアップ（人気4番以下）の3着内率 | {rate(lo & pk, 'top3')} | {rate(lo & ~pk, 'top3')} |",
       f"| ピックアップ（1〜3番人気）の3着内率 | {rate(~lo & pk, 'top3')} | {rate(~lo & ~pk, 'top3')} |",
       f"| 要注意（{flags.CAUTION_POP}番人気以内）の6着以下率 | {rate(wn, 'flop')} | {rate(p5 & ~wn, 'flop')} |"]
-CSV_COLS = (['race_id', 'レース', '馬番', '馬名', '人気', '単勝', '着', '市場あり', '市場なし', '市場の見込み',
+CSV_COLS = (['race_id', 'レース', '馬番', '馬名', '人気', '単勝', '脚質', '着', '市場あり', '市場なし', '市場の見込み',
              '補正スコア', 'ピックアップ点', '凡走点', 'ピックアップ', '要注意']
             + [f'{v}_順' for v in views.VIEWS])
 a.reset_index().rename(columns={'index': '馬番', '_ピックアップ': 'ピックアップ', '_要注意': '要注意'}) \

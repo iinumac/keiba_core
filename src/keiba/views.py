@@ -56,7 +56,8 @@ def _history():
                          'surface': pc['surface'], 'level_score': pc['level_score'], 'fin': fin,
                          'pop': pd.to_numeric(pc['popularity'], errors='coerce'),
                          'spread5': t5 - t_.groupby(pc['race_id']).transform('min'),
-                         'pos': pc['pos'], 'l3f_vs_pos': pc['l3f_vs_pos']})
+                         'pos': pc['pos'], 'l3f_vs_pos': pc['l3f_vs_pos'],
+                         'last_pos': pd.to_numeric(pc['last_corner'], errors='coerce') / pc['n']})
     fig_k = fig.assign(race_id=fig['race_id'].astype(str))[['horse_id', 'race_id', 'figure']]
     info = info.merge(fig_k, on=['horse_id', 'race_id'], how='left').sort_values(['horse_id', 'race_date', 'race_id'])
     out = {'info': info,
@@ -215,6 +216,7 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
     t['対戦比較'] = t['horse_id'].map(table.set_index('horse_id')['score'])
 
     _add_flag_inputs(t, card, hist['info'], as_of, hs)
+    t['脚質'] = running_style(t['horse_id'], hist['info'], as_of)
     fl, pk = flags.flop_flags(t), flags.pickup_flags(t)
     t['凡走重み'] = flags.flop_score(fl)
     t['凡走点'] = flags.flop_points(t['凡走重み'])
@@ -253,7 +255,7 @@ def top3_table(t: pd.DataFrame) -> pd.DataFrame:
 
 
 def to_markdown(card: Dict, t: pd.DataFrame) -> str:
-    """表示用。全馬の一覧・目線ごとのランキング・ピックアップリスト・要注意リスト。"""
+    """表示用。全馬の一覧・目線ごとのランキング・ピックアップ・要注意・差し・追込型のリスト。"""
     from . import flags
 
     def pct(x):
@@ -261,10 +263,11 @@ def to_markdown(card: Dict, t: pd.DataFrame) -> str:
     head = (f"### [{card.get('start_time')}] {card['venue_name']}{card['race_num']}R "
             f"{card['race_name']}（{card.get('surface')}{card.get('distance')}m・{len(t)}頭）")
     L = [head, '', '**1. 全馬の一覧**（補正スコア順。確率はすべて3着内）', '',
-         '| 馬番 | 馬名 | 人気 | 単勝 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ点 | 凡走点 | 印 |',
-         '|---|---|---|---|---|---|---|---|---|---|---|']
+         '| 馬番 | 馬名 | 人気 | 単勝 | 脚質 | 市場あり | 市場なし | 市場の見込み | 補正スコア | ピックアップ点 | 凡走点 | 印 |',
+         '|---|---|---|---|---|---|---|---|---|---|---|---|']
     for n, r in t.sort_values('補正スコア', ascending=False).iterrows():
-        L.append(f"| {n} | {r['馬名']} | {int(r['人気'])} | {r['単勝']} | {pct(r.get('市場あり'))} | {pct(r.get('市場なし'))} | "
+        L.append(f"| {n} | {r['馬名']} | {int(r['人気'])} | {r['単勝']} | {r.get('脚質') or ''} | "
+                 f"{pct(r.get('市場あり'))} | {pct(r.get('市場なし'))} | "
                  f"{pct(r.get('市場の見込み'))} | {pct(r['補正スコア'])} | {r['ピックアップ点']:.1f} | "
                  f"{r['凡走点']:.1f} | {r['印']} |")
     L += ['', '**2. 目線ごとのランキング**', '',
@@ -284,7 +287,36 @@ def to_markdown(card: Dict, t: pd.DataFrame) -> str:
         L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{r['凡走点']:.1f}点）：{r['凡走フラグ']}")
     if warn.empty:
         L.append('- 該当なし')
+    closers = t[t['脚質'].isin(['差し', '追込'])] if '脚質' in t else t.iloc[:0]
+    L += ['', '**5. 差し・追込型**（補正スコア順。直線の長いコースでは、ここから1頭は3着内に来やすい）', '']
+    for n, r in closers.sort_values('補正スコア', ascending=False).iterrows():
+        L.append(f"- {n} {r['馬名']}（{int(r['人気'])}人気・{r['脚質']}・補正スコア{r['補正スコア'] * 100:.1f}%）")
+    if closers.empty:
+        L.append('- 該当なし')
     return '\n'.join(L)
+
+
+STYLE_MIN_RUNS = 3
+STYLE_BANDS = [(0.25, '先行'), (0.5, '中団'), (0.75, '差し'), (1.01, '追込')]
+"""脚質の区切り。過去の4コーナー位置（前からの順位÷頭数）の平均で分ける。
+
+直線が長いコースほど、差し・追込型（平均0.5以上）が3着内に入るレースが増える。
+レース前に分かる脚質で数えて、芝では直線300〜340mで40%、450m以上で50〜52%のレースで1頭以上入る
+（2010年以降。scripts/straight_closers.py）。オッズもこれを織り込んでいるので、
+数字は変えず、組み立ての材料として印だけ付ける。"""
+
+
+def running_style(horse_ids: pd.Series, info: pd.DataFrame, as_of) -> pd.Series:
+    """脚質（先行・中団・差し・追込）。過去に STYLE_MIN_RUNS 走以上ない馬は空欄。"""
+    past = info[info['horse_id'].isin(set(horse_ids)) & (info['race_date'] < as_of)].dropna(subset=['last_pos'])
+    g = past.groupby('horse_id')['last_pos']
+    avg = g.mean().where(g.size() >= STYLE_MIN_RUNS)
+
+    def label(x):
+        if pd.isna(x):
+            return ''
+        return next(name for edge, name in STYLE_BANDS if x < edge)
+    return horse_ids.map(avg).map(label)
 
 
 def picked(t: pd.DataFrame) -> pd.DataFrame:

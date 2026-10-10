@@ -862,6 +862,20 @@ def test_views():
     check('ピックアップには指数のフラグが両方立った馬だけ載る', '5 E（7人気）' in picks and '4 D' not in picks)
     warn = md.split('4. 要注意')[1].split('5. 差し・追込型')[0]
     check('要注意に凡走点の高い人気馬が載る', '1 A（1人気・3.2点）' in warn and '3 C（3人気・2.6点）' in warn)
+    fg = pd.DataFrame({'horse_id': ['a'] * 4 + ['b'] * 2 + ['c'],
+                       'race_date': pd.to_datetime(['2025-08-01', '2026-08-02', '2026-08-16', '2026-09-01',
+                                                    '2026-08-01', '2026-09-01', '2026-09-01']),
+                       'surface': ['ダート', 'ダート', 'ダート', '芝', 'ダート', 'ダート', '芝'],
+                       'distance': [1200, 1800, 1800, 1800, 1200, 1150, 1800],
+                       'figure': [1.373, 0.2, 0.3, 2.0, 0.9, 0.7, 1.0], 'l3f_figure': [0.0] * 7})
+    fs = views._figure_summary(fg, ['a', 'b', 'c'], '2026-10-10', surface='ダート', distance=1800)
+    check('指数は同じ芝ダ・近い距離の過去走だけ（短距離・芝の指数を拾わない）',
+          abs(fs.loc['a', '指数・最高'] - 0.3) < 1e-9 and abs(fs.loc['a', '指数・近3走'] - 0.25) < 1e-9,
+          f"{fs.loc['a'].to_dict()}")
+    check('近い距離が無ければ同じ芝ダの全距離', abs(fs.loc['b', '指数・最高'] - 0.9) < 1e-9)
+    check('同じ芝ダの過去走が無ければ空欄', 'c' not in fs.index or pd.isna(fs.loc['c', '指数・最高']))
+    fa = views._figure_summary(fg, ['a'], '2026-10-10')
+    check('芝ダが分からなければ全過去走', abs(fa.loc['a', '指数・最高'] - 2.0) < 1e-9)
     closers = md.split('5. 差し・追込型')[1]
     check('差し・追込型のリストは補正スコア順', closers.index('2 B') < closers.index('4 D') and '1 A' not in closers)
     info = pd.DataFrame({'horse_id': ['h1'] * 3 + ['h2'] * 3 + ['h3'] * 2,

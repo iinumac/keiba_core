@@ -6,7 +6,8 @@
     目線                 何を見ているか
     市場あり             買い目用モデルの3着内確率（オッズ込みの総合評価）
     市場なし             オッズを使わないモデルの3着内確率（能力だけの評価。レース内の合計を3に揃える）
-    指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）
+    指数・近3走          馬場・ペースを補正したタイムの直近3走平均（figure）。指数はどれも、今回と
+                         芝・ダートが同じで距離が±400m以内の過去走から出す（_figure_summary）
     指数・最高           同じく過去最高値（能力の天井）
     市場の見込み         単勝・複勝オッズとレースの形から見た、市場の3着内見込み
     前走パフォーマンス   前走のレースレベル − 勝ち馬との差（race_level）
@@ -61,7 +62,7 @@ def _history():
     fig_k = fig.assign(race_id=fig['race_id'].astype(str))[['horse_id', 'race_id', 'figure']]
     info = info.merge(fig_k, on=['horse_id', 'race_id'], how='left').sort_values(['horse_id', 'race_date', 'race_id'])
     out = {'info': info,
-           'fig': fig[['horse_id', 'race_date', 'figure', 'l3f_figure']],
+           'fig': fig[['horse_id', 'race_date', 'surface', 'distance', 'figure', 'l3f_figure']],
            'runs': race_level.prepare_runs(raw_races, raw_results),
            'h2h': h2h.History(raw_races, raw_results)}
     _CACHE['hist'] = out
@@ -93,8 +94,32 @@ def _free_model():
     return bundle
 
 
-def _figure_summary(fig: pd.DataFrame, horse_ids: List[str], as_of) -> pd.DataFrame:
+FIGURE_DISTANCE_RANGE = 400
+"""指数を集計する過去走の距離の幅（今回の距離 ± この値）。"""
+
+
+def _figure_summary(fig: pd.DataFrame, horse_ids: List[str], as_of,
+                    surface=None, distance=None) -> pd.DataFrame:
+    """指数（近3走平均・最高・上がり近3走平均）。今回と条件の近い過去走だけで出す。
+
+    全過去走から取ると、ダート1800m戦で1年前のダート1200mの指数が「最高」として拾われる
+    （2026-10-10 京都7R アーデルリーベ: ダート1800mの指数は0.2〜0.3台なのに、
+    ダート1200mの1.373で指数・最高がメンバー1位、ピックアップに載った）。そこで
+
+      1. 芝・ダートが同じ、かつ距離が ±FIGURE_DISTANCE_RANGE m 以内の過去走
+      2. 1が無い馬は、芝・ダートが同じ全距離の過去走
+      3. 同じ芝・ダートの過去走が無い馬（初芝・初ダート）は空欄
+
+    の順で使う。surface が芝・ダートでない（障害など）か渡されないときは全過去走。
+    """
     f = fig[fig['horse_id'].isin(horse_ids) & (fig['race_date'] < pd.Timestamp(as_of))]
+    if surface in ('芝', 'ダート'):
+        same = f[f['surface'] == surface]
+        if distance is not None and pd.notna(distance):
+            near = same[(pd.to_numeric(same['distance'], errors='coerce') - float(distance)).abs()
+                        <= FIGURE_DISTANCE_RANGE]
+            same = pd.concat([near, same[~same['horse_id'].isin(set(near['horse_id']))]])
+        f = same.sort_values(['horse_id', 'race_date'])
     g = f.groupby('horse_id')
     return pd.DataFrame({
         '指数・近3走': g['figure'].apply(lambda x: x.dropna().tail(3).mean()),
@@ -190,7 +215,10 @@ def race_views(card: Dict, as_of=None) -> pd.DataFrame:
                   if n in up.index else '' for n in t.index]
 
     hist = _history()
-    fs = _figure_summary(hist['fig'], list(t['horse_id']), as_of)
+    from . import shutuba
+    fs = _figure_summary(hist['fig'], list(t['horse_id']), as_of,
+                         surface=shutuba.SURFACE_TO_WAREHOUSE.get(card.get('surface'), card.get('surface')),
+                         distance=card.get('distance'))
     for c in fs.columns:
         t[c] = t['horse_id'].map(fs[c])
 

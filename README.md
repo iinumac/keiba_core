@@ -263,3 +263,4 @@ HTML はあるがウェアハウスに入っていないものが 69 件ある�
 - [`docs/BETTING.md`](docs/BETTING.md) — 券種と買い方の選び方、買わない判断の閾値
 - [`docs/SHUTUBA.md`](docs/SHUTUBA.md) — 週末の出馬表の取得（JRA公式が直リンク不可な件を含む）
 - [`docs/odds_deepresearch.md`](docs/odds_deepresearch.md) — オッズ断層の理論
+- [`docs/EVALUATION.md`](docs/EVALUATION.md) — 過去の開催日で予想ロジックを評価する手順（AI エージェント向けの入口は [`AGENTS.md`](AGENTS.md)）
